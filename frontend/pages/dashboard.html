@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TheFundingHouse - Funding Explorer</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Sidebar Component (se carga automáticamente desde components.js) -->
+        <app-sidebar></app-sidebar>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <div class="content-wrapper">
+                <section class="section-opportunities">
+                    <!-- Explorer Toolbar -->
+                    <div class="explorer-toolbar">
+                        <div class="toolbar-left">
+                            <button class="btn-toolbar">Platforms</button>
+                            <button class="btn-toolbar">Filters</button>
+                        </div>
+
+                        <div class="toolbar-center">
+                            <input type="text" id="search-token" placeholder="Search token..." class="search-input">
+                        </div>
+
+                        <div class="toolbar-right">
+                            <div class="time-range-group">
+                                <button class="btn-time">Live</button>
+                                <button class="btn-time active">1h</button>
+                                <button class="btn-time">8h</button>
+                                <button class="btn-time">24h</button>
+                                <button class="btn-time">7d</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Badges -->
+                    <div class="badges-container">
+                        <div class="badge-pill"><span class="icon">✖️</span> 10% off fees</div>
+                        <div class="badge-pill"><span class="icon">🌕</span> 6% off fees</div>
+                        <div class="badge-pill"><span class="icon">🅿️</span> 10% off fees</div>
+                        <div class="badge-pill"><span class="icon">🎒</span> 4% off fees</div>
+                    </div>
+
+                    <!-- Section Header -->
+                    <div class="section-header">
+                        <h3>Funding Explorer</h3>
+                        <p>Las operaciones más rentables en tiempo real.</p>
+                    </div>
+
+                    <!-- Funding Rates Table -->
+                    <div class="operations-table-container">
+                        <table class="operations-table">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Token</th>
+                                    <th>APR ↓</th>
+                                    <th>Long / Short</th>
+                                    <th>Price Spread ⓘ</th>
+                                    <th>Open Interest</th>
+                                    <th>24h Volume</th>
+                                </tr>
+                            </thead>
+                            <tbody id="funding-table-body">
+                                <tr>
+                                    <td colspan="7" class="loading-cell">Loading funding rates...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <!-- Un solo archivo JS con Web Components + lógica de datos -->
+    <script src="components.js?v=2"></script>
+</body>
+
+</html>
