@@ -1,119 +1,125 @@
-// ============================================
-// WEB COMPONENT: Sidebar (MADRE - se define aquí)
-// ============================================
-class AppSidebar extends HTMLElement {
-    connectedCallback() {
-        this.innerHTML = `
-            <aside class="sidebar">
-                <div class="sidebar-header">
-                    <h1 class="logo">TheFundingHouse</h1>
-                    <p class="tagline">Funding Rate Explorer</p>
-                </div>
+// --- 1. Sidebar Renderer (Sin Spot-Perp) ---
+function renderSidebar() {
+    const container = document.getElementById('sidebar-container');
+    if (!container) return;
 
-                <nav class="sidebar-nav">
-                    <a href="dashboard.html" class="nav-item active">
-                        <span class="icon">📊</span>
-                        <span class="text">Funding Explorer</span>
-                    </a>
-                </nav>
+    container.innerHTML = `
+    <div class="p-6">
+        <div class="flex items-center gap-2 mb-1 cursor-pointer" onclick="window.location.href='../index.html'">
+            <div class="w-7 h-7 bg-gradient-to-br from-brandTeal to-brandPurple rounded-lg flex items-center justify-center">
+                <span class="font-bold text-white text-sm">F</span>
+            </div>
+            <span class="text-lg font-bold text-white">TheFundingHouse</span>
+        </div>
+        <span class="text-xs text-slate-500 pl-9">Funding Rate Explorer</span>
+    </div>
 
-                <div class="sidebar-footer">
-                    <div class="user-info">
-                        <span class="user-name">Connect Wallet</span>
-                    </div>
-                </div>
-            </aside>
-        `;
+    <nav class="flex-1 px-4 py-4 space-y-2">
+        <a href="#" class="flex items-center gap-3 px-4 py-3 bg-[#1e1b4b] text-brandTeal rounded-xl font-medium border border-teal-500/20 transition-colors">
+            <i data-lucide="bar-chart-2" class="w-5 h-5"></i>
+            Funding Explorer
+        </a>
+        <!-- Se ha eliminado Spot-Perp Arbs como pediste -->
+    </nav>
 
-        // Marcar como activo el link actual
-        this.setActiveLink();
-    }
+    <div class="p-4 border-t border-white/5 mt-auto">
+        <button class="w-full bg-[#1e1b4b] hover:bg-[#2d2a6e] text-indigo-100 py-3 rounded-xl font-medium flex items-center justify-center gap-2 border border-indigo-500/30 transition-colors">
+            <i data-lucide="wallet" class="w-5 h-5"></i>
+            Connect Wallet
+        </button>
+    </div>
+    `;
+}
 
-    setActiveLink() {
-        const currentPage = window.location.pathname.split('/').pop() || 'dashboard.html';
-        const links = this.querySelectorAll('.nav-item');
-        links.forEach(link => {
-            if (link.getAttribute('href') === currentPage) {
-                link.classList.add('active');
-            } else {
-                link.classList.remove('active');
+// --- 2. Lógica de Interfaz (Dropdown y Temporalidades) ---
+function initUIInteractions() {
+    // A. Dropdown de Plataformas
+    const btn = document.getElementById('platforms-btn');
+    const dropdown = document.getElementById('platforms-dropdown');
+    
+    if (btn && dropdown) {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            dropdown.classList.toggle('hidden');
+        });
+
+        // Cerrar si clic fuera
+        document.addEventListener('click', (e) => {
+            if (!btn.contains(e.target) && !dropdown.contains(e.target)) {
+                dropdown.classList.add('hidden');
             }
         });
     }
+
+    // B. Filtros de Tiempo
+    const timeButtons = document.querySelectorAll('.time-btn');
+    timeButtons.forEach(button => {
+        button.addEventListener('click', () => {
+            // Remover clase active de todos
+            timeButtons.forEach(b => b.classList.remove('active'));
+            // Añadir al clickeado
+            button.classList.add('active');
+            
+            // Aquí podrías llamar a tu backend con la nueva temporalidad
+            console.log("Timeframe changed to:", button.dataset.val);
+            // initDashboard(button.dataset.val); // Ejemplo de recarga
+        });
+    });
 }
 
-// Registrar el componente
-customElements.define('app-sidebar', AppSidebar);
-
-
-// ============================================
-// LÓGICA DE DATOS: Funding Rates Table
-// ============================================
-document.addEventListener('DOMContentLoaded', async () => {
+// --- 3. Datos y Tablas ---
+function initDashboard() {
     const tableBody = document.getElementById('funding-table-body');
+    // Datos de ejemplo para que veas que funciona
+    const mockData = [
+        { token: "BTC", apr: 25.5, long_platform: "Hyperliquid", short_platform: "Paradex", spread: 0.04, oi_long: "4M", oi_short: "3.2M", volume: "120M" },
+        { token: "ETH", apr: 19.2, long_platform: "Backpack", short_platform: "Aster", spread: 0.01, oi_long: "12M", oi_short: "10M", volume: "350M" },
+        { token: "SOL", apr: 15.8, long_platform: "Paradex", short_platform: "Hyperliquid", spread: 0.08, oi_long: "800K", oi_short: "900K", volume: "45M" },
+        { token: "SUI", apr: 12.1, long_platform: "Aster", short_platform: "Backpack", spread: 0.05, oi_long: "1.2M", oi_short: "1.1M", volume: "22M" }
+    ];
+    
+    // Si tienes backend real, descomenta el fetch y comenta renderTableRows(mockData...)
+    /*
+    fetch('/api/v1/opportunities')
+        .then(res => res.json())
+        .then(data => renderTableRows(data, tableBody))
+        .catch(err => {
+            console.error(err);
+            tableBody.innerHTML = '<tr><td colspan="8" class="text-center py-4 text-red-400">Error loading data</td></tr>';
+        });
+    */
+   
+    renderTableRows(mockData, tableBody);
+}
 
-    if (!tableBody) return; // Si no estamos en la página de funding explorer, salir
-
-    try {
-        // Llamar al API Gateway
-        const response = await fetch('http://localhost:3000/api/v1/data-ingestion/funding-rates?limit=50');
-        const data = await response.json();
-
-        if (data.length === 0) {
-            tableBody.innerHTML = '<tr><td colspan="7" class="loading-cell">No data available</td></tr>';
-            return;
-        }
-
-        // Renderizar datos en la tabla
-        tableBody.innerHTML = data.map((item, index) => {
-            const apr = item.apr || 0;
-            const aprClass = apr > 10 ? 'apr-high' : apr > 5 ? 'apr-medium' : 'apr-low';
-
-            return `
-                <tr>
-                    <td>${index + 1}</td>
-                    <td>
-                        <div class="token-cell">
-                            <strong>${item.pair}</strong>
-                            <span class="exchange-badge">${item.exchange_id}</span>
-                        </div>
-                    </td>
-                    <td class="${aprClass}">
-                        <strong>${apr.toFixed(2)}%</strong>
-                    </td>
-                    <td>
-                        <div class="pair-cell">
-                            <span class="long">Long</span>
-                            <span class="short">Short</span>
-                        </div>
-                    </td>
-                    <td>${(item.spread * 100).toFixed(3)}%</td>
-                    <td>$${formatNumber(item.open_interest)}</td>
-                    <td>$${formatNumber(item.volume_24h)}</td>
-                </tr>
-            `;
-        }).join('');
-
-    } catch (error) {
-        console.error('Error loading funding rates:', error);
-        tableBody.innerHTML = `
-            <tr>
-                <td colspan="7" class="error-cell">
-                    Error loading data: ${error.message}
-                </td>
-            </tr>
-        `;
+function renderTableRows(data, container) {
+    if (!data || data.length === 0) {
+        container.innerHTML = '<tr><td colspan="8" class="text-center py-10 text-slate-400">No data available</td></tr>';
+        return;
     }
-});
 
-// Utility: Formatear números grandes
-function formatNumber(num) {
-    if (num >= 1_000_000_000) {
-        return (num / 1_000_000_000).toFixed(2) + 'B';
-    } else if (num >= 1_000_000) {
-        return (num / 1_000_000).toFixed(2) + 'M';
-    } else if (num >= 1_000) {
-        return (num / 1_000).toFixed(2) + 'K';
-    }
-    return num.toFixed(2);
+    container.innerHTML = data.map((item, i) => `
+        <tr class="hover:bg-white/5 transition-colors group">
+            <td class="px-4 py-3 text-slate-400 border-b border-white/5 first:rounded-l-lg">${i + 1}</td>
+            <td class="px-4 py-3 font-bold text-white border-b border-white/5 flex items-center gap-2">
+                <div class="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center text-[10px]">${item.token[0]}</div>
+                ${item.token}
+            </td>
+            <td class="px-4 py-3 text-brandTeal font-mono border-b border-white/5">${item.apr}%</td>
+            <td class="px-4 py-3 text-slate-300 border-b border-white/5 text-xs">
+                ${item.long_platform.substring(0,2).toUpperCase()} / ${item.short_platform.substring(0,2).toUpperCase()}
+            </td>
+            <td class="px-4 py-3 text-slate-400 border-b border-white/5 font-mono hidden md:table-cell">${item.spread}%</td>
+            <td class="px-4 py-3 text-slate-400 border-b border-white/5 font-mono text-xs hidden md:table-cell">
+                <div class="text-green-400/70">L: ${item.oi_long}</div>
+                <div class="text-red-400/70">S: ${item.oi_short}</div>
+            </td>
+            <td class="px-4 py-3 text-slate-500 border-b border-white/5 font-mono hidden md:table-cell">${item.volume}</td>
+            <td class="px-4 py-3 text-right border-b border-white/5 last:rounded-r-lg">
+                <button class="text-brandTeal hover:bg-brandTeal/10 p-2 rounded transition-colors"><i data-lucide="external-link" class="w-4 h-4"></i></button>
+            </td>
+        </tr>
+    `).join('');
+    
+    if(window.lucide) lucide.createIcons();
 }

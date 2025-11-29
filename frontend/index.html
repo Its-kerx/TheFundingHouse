@@ -1,103 +1,93 @@
 <!DOCTYPE html>
-<html lang="es">
-
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TheFundingHouse - Agregador de PERP-dex y Arbitraje de Funding Rate</title>
-    <link rel="stylesheet" href="css/style.css">
-    <link rel="icon" href="img/favicon.png">
-</head>
+    <title>TheFundingHouse | Home</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="stylesheet" href="css/landing.css">
 
-<body>
-    <header class="header">
-        <div class="container">
-            <h1 class="logo">TheFundingHouse</h1>
-            <nav class="nav">
-                <ul>
-                    <li><a href="#features">Características</a></li>
-                    <li><a href="#pricing">Precios</a></li>
-                    <li><a href="dashboard.html" class="btn-primary">Lanzar App</a></li>
-                </ul>
-            </nav>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        bgDark: '#0f0e24',
+                        cardDark: '#1a1b3b',
+                        brandTeal: '#2dd4bf',
+                        brandPurple: '#8b5cf6',
+                    },
+                    fontFamily: { sans: ['Inter', 'sans-serif'] }
+                }
+            }
+        }
+    </script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+</head>
+<body class="bg-bgDark text-white font-sans overflow-x-hidden">
+
+    <!-- Navbar Limpia -->
+    <nav class="fixed top-0 w-full z-50 bg-bgDark/80 backdrop-blur-md border-b border-white/5">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between items-center h-20">
+                <!-- Solo el Logo -->
+                <div class="flex items-center gap-2 cursor-pointer" onclick="location.reload()">
+                    <div class="w-8 h-8 bg-gradient-to-br from-brandTeal to-brandPurple rounded-lg flex items-center justify-center">
+                        <span class="font-bold text-white text-lg">F</span>
+                    </div>
+                    <span class="text-xl font-bold text-white tracking-tight">
+                        TheFunding<span class="text-brandTeal">House</span>
+                    </span>
+                </div>
+                
+                <!-- Botón Launch App a la derecha -->
+                <div class="flex items-center gap-4">
+                    <a href="pages/dashboard.html" class="bg-brandTeal hover:bg-teal-400 text-bgDark font-bold py-2 px-6 rounded-full transition-all shadow-lg shadow-teal-500/20">
+                        Launch App
+                    </a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Hero Section (Sin botones abajo) -->
+    <header class="relative pt-32 pb-20 px-4 text-center">
+        <div class="glow-effect"></div>
+        <div class="max-w-4xl mx-auto relative z-10">
+            <div class="pill-badge mb-6">
+                <span class="relative flex h-2 w-2 mr-2">
+                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-teal-400 opacity-75"></span>
+                  <span class="relative inline-flex rounded-full h-2 w-2 bg-brandTeal"></span>
+                </span>
+                Live Data Feed
+            </div>
+            <h1 class="text-5xl md:text-7xl font-bold mb-6 leading-tight">
+                Delta-Neutral Funding <br />
+                & Arbitrage. <span class="text-transparent bg-clip-text bg-gradient-to-r from-brandTeal to-brandPurple">Simplified.</span>
+            </h1>
+            <p class="text-lg text-slate-400 mb-10 max-w-2xl mx-auto">
+                Real-time funding rates and perp prices across top DEXs.
+            </p>
+            <!-- BOTONES ELIMINADOS AQUÍ -->
         </div>
     </header>
 
-    <main>
-        <section id="hero" class="hero">
-            <div class="container">
-                <h2>Maximiza tus ganancias con Arbitraje de Funding Rate</h2>
-                <p>Agregamos los mejores PERP-dex para encontrar y ejecutar oportunidades únicas.</p>
-                <a href="dashboard.html" class="btn-secondary">Explorar Oportunidades</a>
+    <!-- Data Sources Section -->
+    <section class="py-16 bg-bgDark">
+        <div class="max-w-6xl mx-auto px-4">
+            <h2 class="text-center text-slate-400 mb-12 uppercase text-sm tracking-wider">Trusted Data Sources</h2>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="source-card">Hyperliquid</div>
+                <div class="source-card">Backpack</div>
+                <div class="source-card">Paradex</div>
+                <div class="source-card">Aster</div>
             </div>
-        </section>
-
-        <section id="trusted-sources" class="section-trusted-sources">
-            <div class="container">
-                <h3>Nuestras fuentes de datos de confianza</h3>
-                <div class="sources-grid">
-                    <a href="#" class="source-card" target="_blank">
-                        <div class="source-icon">🌊</div> <!-- Placeholder for Hyperliquid -->
-                        <span>Hyperliquid</span>
-                    </a>
-                    <a href="#" class="source-card" target="_blank">
-                        <div class="source-icon">✖️</div> <!-- Placeholder for Extended -->
-                        <span>Extended</span>
-                    </a>
-                    <a href="#" class="source-card" target="_blank">
-                        <div class="source-icon">🎒</div> <!-- Placeholder for Backpack -->
-                        <span>Backpack</span>
-                    </a>
-                    <a href="#" class="source-card" target="_blank">
-                        <div class="source-icon">✴️</div> <!-- Placeholder for Aster -->
-                        <span>Aster</span>
-                    </a>
-                    <a href="#" class="source-card" target="_blank">
-                        <div class="source-icon">🅿️</div> <!-- Placeholder for Paradex -->
-                        <span>Paradex</span>
-                    </a>
-                    <a href="#" class="source-card" target="_blank">
-                        <div class="source-icon">⚡</div> <!-- Placeholder for Lighter -->
-                        <span>Lighter</span>
-                    </a>
-                    <a href="#" class="source-card" target="_blank">
-                        <div class="source-icon">💠</div> <!-- Placeholder for Pacifica -->
-                        <span>Pacifica</span>
-                    </a>
-                    <a href="#" class="source-card" target="_blank">
-                        <div class="source-icon">🌀</div> <!-- Placeholder for Ethereal -->
-                        <span>Ethereal</span>
-                    </a>
-                </div>
-            </div>
-        </section>
-
-        <section id="features" class="section-features">
-            <div class="container">
-                <h3>¿Por qué TheFundingHouse?</h3>
-                <div class="feature-list">
-                    <div class="feature-card">
-                        <h4>Arbitraje Delta Neutral</h4>
-                        <p>Gana comisiones de funding rate sin exposición al precio del activo.</p>
-                    </div>
-                    <div class="feature-card">
-                        <h4>Agregador Multi-Exchange</h4>
-                        <p>Conectamos con Hyperliquid, GMX, Drift, Vertex y más.</p>
-                    </div>
-                    <div class="feature-card">
-                        <h4>Ejecución en un Click</h4>
-                        <p>Simplificamos la operativa compleja en una sola transacción.</p>
-                    </div>
-                </div>
-            </div>
-        </section>
-    </main>
-
-    <footer class="footer">
-        <div class="container">
-            <p>&copy; 2023 TheFundingHouse. Todos los derechos reservados.</p>
         </div>
-    </footer>
-</body>
+    </section>
 
+    <script src="js/components.js"></script>
+    <script>document.addEventListener('DOMContentLoaded', () => lucide.createIcons());</script>
+</body>
 </html>

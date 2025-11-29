@@ -1,0 +1,68 @@
+/* Efecto de resplandor de fondo */
+.glow-effect {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 600px;
+    height: 400px;
+    background: rgba(139, 92, 246, 0.15); /* Purple opacity */
+    border-radius: 100%;
+    filter: blur(100px);
+    z-index: -1;
+}
+
+.pill-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.25rem 0.75rem;
+    background-color: rgba(45, 212, 191, 0.1);
+    border: 1px solid rgba(45, 212, 191, 0.2);
+    border-radius: 9999px;
+    color: #2dd4bf;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.btn-primary {
+    background-color: #2dd4bf;
+    color: #0f0e24;
+    font-weight: 700;
+    padding: 0.75rem 2rem;
+    border-radius: 9999px;
+    transition: all 0.2s;
+    box-shadow: 0 10px 15px -3px rgba(45, 212, 191, 0.2);
+}
+
+.btn-primary:hover {
+    background-color: #5eead4;
+    transform: translateY(-1px);
+}
+
+.btn-secondary {
+    border: 1px solid #475569;
+    color: #cbd5e1;
+    padding: 0.75rem 2rem;
+    border-radius: 9999px;
+    transition: all 0.2s;
+}
+
+.btn-secondary:hover {
+    border-color: #94a3b8;
+    color: white;
+}
+
+.source-card {
+    background-color: #1a1b3b;
+    padding: 1.5rem;
+    border-radius: 0.75rem;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    text-align: center;
+    color: #cbd5e1;
+    font-weight: 500;
+    transition: background-color 0.2s;
+}
+
+.source-card:hover {
+    background-color: #23244a;
+}

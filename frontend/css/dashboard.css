@@ -1,0 +1,70 @@
+.custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: #0f0e24;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #334155;
+    border-radius: 3px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #475569;
+}
+
+.search-input {
+    width: 100%;
+    background-color: #1e1e30;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0.5rem;
+    padding: 0.5rem 1rem 0.5rem 2.5rem;
+    font-size: 0.875rem;
+    color: white;
+}
+.search-input:focus {
+    outline: none;
+    border-color: rgba(45, 212, 191, 0.5);
+}
+
+.btn-filter {
+    background-color: #2dd4bf;
+    color: #0f0e24;
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    font-weight: 500;
+    font-size: 0.875rem;
+    display: flex;
+    align-items: center;
+}
+
+.btn-filter-outline {
+    background-color: #1e1e30;
+    color: #cbd5e1;
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    font-weight: 500;
+    font-size: 0.875rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.time-range-pill {
+    display: flex;
+    background-color: #1e1e30;
+    padding: 0.25rem;
+    border-radius: 0.5rem;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.time-range-pill button {
+    padding: 0.25rem 0.75rem;
+    font-size: 0.75rem;
+    color: #94a3b8;
+    border-radius: 0.25rem;
+    transition: all 0.2s;
+}
+
+.time-range-pill button.active {
+    background-color: #475569;
+    color: white;
+}
