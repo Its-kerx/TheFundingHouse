@@ -2,10 +2,11 @@
 Hyperliquid Exchange Adapter
 
 Fetches and normalizes data from Hyperliquid perpetual futures exchange.
+Only extracts raw fields from the API (no derived calculations).
 """
 
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 from hyperliquid.info import Info
 
 from .base import ExchangeAdapter
@@ -17,34 +18,43 @@ class HyperliquidAdapter(ExchangeAdapter):
     def __init__(self):
         super().__init__("Hyperliquid")
         self.info = Info()
+
+        # Cache for market metadata + contexts
         self._markets_cache: List[Dict[str, Any]] = []
-        self._market_ctx_cache: Dict[str, Dict[str, float]] = {}
+        self._market_ctx_cache: Dict[str, Dict[str, Any]] = {}
         self._cache_timestamp: Optional[datetime] = None
-        self._cache_ttl_seconds = 60
+        self._cache_ttl_seconds = 60  # seconds
+
+        # Cache for "all markets" payload (used por get_all_market_data_cached)
+        self._cache_all_markets: Optional[List[Dict[str, Any]]] = None
+        self._cache_all_markets_ts: Optional[datetime] = None
 
     async def _ensure_cache(self) -> None:
         """
         Refresh markets and asset contexts if cache is stale.
         Uses meta_and_asset_ctxs + all_mids so we only hit the API once.
         """
-        now = datetime.now()
+        now = datetime.utcnow()
         if (
-            self._cache_timestamp
+            self._cache_timestamp is not None
             and (now - self._cache_timestamp).total_seconds() < self._cache_ttl_seconds
         ):
             return
 
         try:
+            # meta: info about markets, asset_ctxs: per-market context with raw fields
             meta, asset_ctxs = self.info.meta_and_asset_ctxs()
             mids = self.info.all_mids()
 
             markets: List[Dict[str, Any]] = []
-            market_ctx: Dict[str, Dict[str, float]] = {}
+            market_ctx: Dict[str, Dict[str, Any]] = {}
 
             for asset, ctx in zip(meta.get("universe", []), asset_ctxs):
                 raw_symbol = asset.get("name")
                 if not raw_symbol:
                     continue
+
+                raw_ctx = ctx  # naming claro
 
                 markets.append(
                     {
@@ -58,31 +68,43 @@ class HyperliquidAdapter(ExchangeAdapter):
                     }
                 )
 
+                # Solo campos CRUDOS, convertidos a float donde toca
                 market_ctx[raw_symbol] = {
-                    "funding_8h": self._to_float(
-                        ctx.get("funding") or ctx.get("currentFunding") or 0.0
+                    "funding_raw": self._to_float(
+                        raw_ctx.get("funding")
+                        or raw_ctx.get("currentFunding")
+                        or 0.0
                     ),
                     "open_interest": self._to_float(
-                        ctx.get("openInterest")
-                        or ctx.get("openInterestUsd")
-                        or ctx.get("openInterestNotional")
+                        raw_ctx.get("openInterest")
+                        or raw_ctx.get("openInterestNotional")
                         or 0.0
                     ),
                     "volume_24h": self._to_float(
-                        ctx.get("dayNtlVlm") or ctx.get("dayNtlVlmUsd") or 0.0
+                        raw_ctx.get("dayNtlVlm") or raw_ctx.get("dayBaseVlm") or 0.0
                     ),
-                    "mid_price": self._to_float(mids.get(raw_symbol, 0.0)),
+                    "mark_price": self._to_float(
+                        raw_ctx.get("markPx") or mids.get(raw_symbol, 0.0)
+                    ),
+                    "oracle_price": self._to_float(raw_ctx.get("oraclePx"))
+                    if raw_ctx.get("oraclePx") is not None
+                    else None,
+                    "mid_price": self._to_float(
+                        raw_ctx.get("midPx") or mids.get(raw_symbol, 0.0)
+                    ),
+                    "raw_ctx": raw_ctx,
                 }
 
             self._markets_cache = markets
             self._market_ctx_cache = market_ctx
             self._cache_timestamp = now
+
         except Exception as e:
             print(f"Error refreshing Hyperliquid cache: {e}")
-            # Keep old cache if available; otherwise leave empty
+            # Si falla, mantenemos la caché anterior si existe
 
     async def get_markets(self) -> List[Dict[str, Any]]:
-        """Get all perpetual markets from Hyperliquid"""
+        """Get all perpetual markets from Hyperliquid (normalized symbols)"""
         try:
             await self._ensure_cache()
             return self._markets_cache
@@ -100,15 +122,15 @@ class HyperliquidAdapter(ExchangeAdapter):
             if not ctx:
                 return None
 
-            funding_rate = ctx["funding_8h"]
-            timestamp = datetime.now()
+            timestamp = datetime.utcnow()
+            funding_rate = ctx.get("funding_raw", 0.0)
 
             return {
                 "symbol": self.normalize_symbol(raw_symbol),
                 "exchange": self.exchange_name,
                 "funding_rate": funding_rate,
                 "timestamp": timestamp,
-                "next_funding_time": timestamp + timedelta(hours=8),
+                "next_funding_time": None,  # no inferimos nada
             }
 
         except Exception as e:
@@ -116,7 +138,7 @@ class HyperliquidAdapter(ExchangeAdapter):
             return None
 
     async def get_market_data(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Get comprehensive market data using cached contexts"""
+        """Get raw market data snapshot for a single symbol"""
         try:
             await self._ensure_cache()
             raw_symbol = self._denormalize_symbol(symbol)
@@ -125,33 +147,59 @@ class HyperliquidAdapter(ExchangeAdapter):
             if not ctx:
                 return None
 
-            return self._build_market_payload(raw_symbol, ctx, include_spread=True)
+            return self._build_market_payload(raw_symbol, ctx)
 
         except Exception as e:
             print(f"Error fetching market data for {symbol}: {e}")
             return None
 
     async def get_all_market_data(
-        self, include_spread: bool = False
+        self, include_spread: bool = False  # kept for compat; se ignora
     ) -> List[Dict[str, Any]]:
         """
-        Return market snapshots for all assets using cached contexts.
-        Set include_spread=True to compute L2 spreads only for the symbols you need.
+        Return raw market snapshots for all assets using cached contexts.
+        No derived calculations, solo datos tal cual de Hyperliquid.
         """
         try:
             await self._ensure_cache()
             data: List[Dict[str, Any]] = []
             for raw_symbol, ctx in self._market_ctx_cache.items():
-                data.append(self._build_market_payload(raw_symbol, ctx, include_spread))
+                data.append(self._build_market_payload(raw_symbol, ctx))
             return data
         except Exception as e:
             print(f"Error fetching all market data: {e}")
             return []
 
+    async def get_all_market_data_cached(
+        self, include_spread: bool = True, max_age_seconds: int = 60 * 30
+    ) -> List[Dict[str, Any]]:
+        """
+        Return cached market snapshots for all assets, refreshing when stale.
+        include_spread se ignora (no calculamos spread aquí).
+        """
+        try:
+            now = datetime.utcnow()
+            if (
+                self._cache_all_markets is not None
+                and self._cache_all_markets_ts is not None
+                and (now - self._cache_all_markets_ts).total_seconds() < max_age_seconds
+            ):
+                return self._cache_all_markets
+
+            data = await self.get_all_market_data(include_spread=include_spread)
+            self._cache_all_markets = data
+            self._cache_all_markets_ts = now
+            return data
+        except Exception as e:
+            print(f"Error fetching cached market data: {e}")
+            return []
+
+    # --------- Helpers ---------
+
     def normalize_symbol(self, raw_symbol: str) -> str:
         """
-        Hyperliquid uses simple symbols like 'BTC', 'ETH'
-        We normalize to 'BTC-USD', 'ETH-USD' format
+        Hyperliquid usa símbolos como 'BTC', 'ETH' o '0G-USD'.
+        Normalizamos a 'BASE-USD' cuando no lleva guion.
         """
         if "-" in raw_symbol:
             return raw_symbol
@@ -161,30 +209,6 @@ class HyperliquidAdapter(ExchangeAdapter):
         """Convert 'BTC-USD' to 'BTC' which is what the SDK expects"""
         return symbol.split("-")[0] if "-" in symbol else symbol
 
-    def _compute_spread(self, raw_symbol: str) -> float:
-        """Compute bid/ask spread using L2 snapshot; return 0.0 on error"""
-        try:
-            l2_data = self.info.l2_snapshot(name=raw_symbol)
-            if not l2_data or "levels" not in l2_data:
-                return 0.0
-
-            bids = l2_data["levels"][0]
-            asks = l2_data["levels"][1]
-
-            if not bids or not asks:
-                return 0.0
-
-            best_bid = self._to_float(bids[0].get("px"))
-            best_ask = self._to_float(asks[0].get("px"))
-
-            if best_ask <= 0:
-                return 0.0
-
-            return (best_ask - best_bid) / best_ask
-        except Exception as e:
-            print(f"Error calculating spread for {raw_symbol}: {e}")
-            return 0.0
-
     def _to_float(self, value: Any) -> float:
         try:
             return float(value)
@@ -192,27 +216,32 @@ class HyperliquidAdapter(ExchangeAdapter):
             return 0.0
 
     def _build_market_payload(
-        self, raw_symbol: str, ctx: Dict[str, float], include_spread: bool
+        self,
+        raw_symbol: str,
+        ctx: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Build normalized market payload from cached context"""
-        funding_rate = ctx.get("funding_8h", 0.0)
-        apr = self.calculate_apr(funding_rate, funding_interval_hours=8)
-        mark_price = ctx.get("mid_price", 0.0)
-        spread = (
-            round(self._compute_spread(raw_symbol) * 100, 4)
-            if include_spread
-            else 0.0
-        )
+        """
+        Build raw market payload for a given symbol.
+        Solo mapeamos campos crudos de Hyperliquid a nombres consistentes.
+        """
+        raw_ctx = ctx.get("raw_ctx", {})
+
+        # Opcional: debug para un símbolo concreto
+        # if self.normalize_symbol(raw_symbol) == "0G-USD":
+        #     print("RAW 0G-USD FROM HYPERLIQUID:", raw_ctx)
+
+        timestamp = datetime.utcnow()
 
         return {
-            "symbol": self.normalize_symbol(raw_symbol),
             "exchange": self.exchange_name,
-            "mark_price": mark_price,
-            "index_price": mark_price,
-            "open_interest": ctx.get("open_interest", 0.0),
-            "volume_24h": ctx.get("volume_24h", 0.0),
-            "funding_rate": funding_rate,
-            "apr": apr,
-            "spread": spread,
-            "timestamp": datetime.now(),
+            "symbol": self.normalize_symbol(raw_symbol),
+            "timestamp": timestamp,
+            "funding_rate": ctx.get("funding_raw", 0.0),      # float crudo
+            "next_funding_time": None,                        # no inferimos
+            "open_interest": ctx.get("open_interest", 0.0),   # float crudo
+            "volume_24h": ctx.get("volume_24h", 0.0),         # float crudo
+            "mark_price": ctx.get("mark_price", 0.0),         # float crudo
+            "oracle_price": ctx.get("oracle_price", None),    # float o None
+            # contexto completo tal y como viene del SDK (para trazabilidad)
+            "raw": raw_ctx,
         }
