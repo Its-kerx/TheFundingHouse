@@ -4,8 +4,9 @@ Launcher sencillo para entorno local:
 
  1) Levanta Mongo y Postgres con Docker
  2) Arranca data-ingestion-service (puerto 8001) usando su venv
- 3) Arranca api-gateway (puerto 3000) usando su venv
- 4) Sirve el frontend estático en el puerto 8080
+ 3) Arranca funding-analytics-service (puerto 8002) usando su venv
+ 4) Arranca api-gateway (puerto 3000) usando su venv
+ 5) Sirve el frontend estático en el puerto 8080
 
 Supone que:
  - Docker está instalado y en el PATH
@@ -66,14 +67,20 @@ def main() -> None:
     data_python = python_in_venv(data_dir)
     procs.append(start_process([data_python, "main.py"], cwd=data_dir))
 
-    # 3) API Gateway
-    print("3) Iniciando API Gateway (puerto 3000)...")
+    # 3) Funding Analytics
+    print("3) Iniciando Funding Analytics Service (puerto 8002)...")
+    analytics_dir = ROOT / "microservices" / "funding-analytics-service"
+    analytics_python = python_in_venv(analytics_dir)
+    procs.append(start_process([analytics_python, "main.py"], cwd=analytics_dir))
+
+    # 4) API Gateway
+    print("4) Iniciando API Gateway (puerto 3000)...")
     api_dir = ROOT / "api-gateway"
     api_python = python_in_venv(api_dir)
     procs.append(start_process([api_python, "main.py"], cwd=api_dir))
 
-    # 4) Frontend estático
-    print("4) Iniciando frontend (puerto 8080)...")
+    # 5) Frontend estático
+    print("5) Iniciando frontend (puerto 8080)...")
     frontend_dir = ROOT / "frontend"
     procs.append(
         start_process(
@@ -84,10 +91,11 @@ def main() -> None:
 
     print(
         "\nTodo iniciado. URLs:\n"
-        "- Frontend:          http://localhost:8080\n"
-        "- API Gateway:       http://localhost:3000\n"
-        "- Gateway health:    http://localhost:3000/health\n"
-        "- Data ingestion:    http://localhost:8001/status\n"
+        "- Frontend:              http://localhost:8080\n"
+        "- API Gateway:           http://localhost:3000\n"
+        "- Gateway health:        http://localhost:3000/health\n"
+        "- Data ingestion:        http://localhost:8001/status\n"
+        "- Funding analytics:     http://localhost:8002/docs\n"
         "Deja esta ventana abierta; Ctrl+C para parar todo."
     )
 
