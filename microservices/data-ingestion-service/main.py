@@ -67,49 +67,55 @@ async def startup_event():
     await funding_col.create_index([("exchange", 1), ("symbol", 1)], unique=True)
     await hyper_col.create_index([("exchange", 1), ("symbol", 1)], unique=True)
 
-
-async def refresh_hyperliquid_markets():
+async def refresh_hyperliquid_markets() -> None:
     """
-    1) Pide TODOS los mercados a Hyperliquid (con caché en memoria).
-    2) Les da formato común.
-    3) Los guarda en MongoDB mediante upsert.
+    1) Pide TODOS los mercados a Hyperliquid (datos crudos desde el adaptador).
+    2) Los guarda en la colección hyper_col, un doc por (exchange, symbol).
+    3) Elimina campos antiguos que no queremos (apr, spread, estimated_funding_rate).
     """
     if hyper_col is None:
         raise RuntimeError("Hyperliquid collection not initialized")
 
-    now = datetime.utcnow()
-
     markets: List[Dict[str, Any]] = await hyperliquid_adapter.get_all_market_data_cached(
-        include_spread=True,
-        # max_age_seconds=60 * 60 * 8,
+        include_spread=False,
+        max_age_seconds=0,  # fuerza datos frescos del adaptador
     )
 
     if not markets:
-        print(">>> No se recibieron mercados de Hyperliquid")
+        print(">>> No markets received from Hyperliquid")
         return
 
     operations: List[UpdateOne] = []
+    now = datetime.utcnow()
 
     for m in markets:
         doc = {
             "exchange": m["exchange"],
             "symbol": m["symbol"],
             "timestamp": m["timestamp"],
-            "funding_rate": m.get("funding_rate"),
+            "funding_rate": m["funding_rate"],
             "next_funding_time": m.get("next_funding_time"),
-            "open_interest": m.get("open_interest"),
-            "volume_24h": m.get("volume_24h"),
-            "mark_price": m.get("mark_price"),
+            "open_interest": m["open_interest"],
+            "volume_24h": m["volume_24h"],
+            "mark_price": m["mark_price"],
             "oracle_price": m.get("oracle_price"),
             "data_source": "Real Hyperliquid API",
             "raw": m.get("raw"),
-            "last_updated_at": datetime.utcnow(),
+            "last_updated_at": now,
         }
 
         operations.append(
             UpdateOne(
                 {"exchange": doc["exchange"], "symbol": doc["symbol"]},
-                {"$set": doc},
+                {
+                    "$set": doc,
+                    # MUY IMPORTANTE: limpiamos los campos viejos
+                    "$unset": {
+                        "apr": "",
+                        "spread": "",
+                        "estimated_funding_rate": "",
+                    },
+                },
                 upsert=True,
             )
         )
@@ -134,54 +140,6 @@ async def get_status():
         "version": "0.1.0",
         "message": "Microservicio operativo.",
     }
-
-
-@app.get("/funding-rates", response_model=List[FundingRate])
-async def get_funding_rates(
-    limit: int = Query(20, ge=1, le=500),
-    exchange: str | None = None,
-):
-    if funding_col is None:
-        raise HTTPException(status_code=500, detail="DB not initialized")
-
-    query: Dict[str, Any] = {}
-    if exchange:
-        query["exchange"] = exchange
-
-    try:
-        cursor = funding_col.find(query).sort("symbol", 1).limit(limit)
-        results: List[FundingRate] = []
-
-        async for doc in cursor:
-            fr = FundingRate(
-                exchange_id=doc["exchange"],
-                pair=doc["symbol"],
-                timestamp=doc["timestamp"],
-                funding_rate=doc["funding_rate"],
-                next_funding_time=doc["next_funding_time"],
-                estimated_funding_rate=doc["estimated_funding_rate"],
-                open_interest=doc["open_interest"],
-                apr=doc["apr"],
-                spread=doc["spread"],
-                volume_24h=doc["volume_24h"],
-                data_source=doc.get("data_source", "Mongo snapshot"),
-            )
-            results.append(fr)
-
-        return results
-    except Exception as e:
-        print(">>> Error leyendo funding rates de Mongo:", e)
-        raise HTTPException(status_code=500, detail="Error fetching funding rates")
-
-
-@app.post("/funding-rates/refresh")
-async def refresh_funding_rates():
-    """
-    Lanza la ingestión de TODOS los mercados de Hyperliquid y actualiza MongoDB.
-    """
-    await refresh_hyperliquid_markets()
-    return {"status": "ok"}
-
 
 @app.post("/hyperliquid/refresh")
 async def hyperliquid_refresh():
