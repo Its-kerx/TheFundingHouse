@@ -1,5 +1,9 @@
 version: "3.9"
+
 services:
+  # ------------------------
+  # Bases de datos
+  # ------------------------
   mongo:
     image: mongo:6
     container_name: tfh-mongo
@@ -24,6 +28,70 @@ services:
       POSTGRES_DB: tfhdb
     volumes:
       - pg_data:/var/lib/postgresql/data
+
+  # ------------------------
+  # Microservicio: Data Ingestion
+  # ------------------------
+  data_ingestion:
+    build: ./microservices/data-ingestion-service
+    container_name: tfh-data-ingestion
+    restart: unless-stopped
+    environment:
+      MONGO_URI: mongodb://root:example@mongo:27017
+      MONGO_DB: tfh
+      PORT: 8001
+    depends_on:
+      - mongo
+    ports:
+      - "8001:8001"
+
+  # ------------------------
+  # Microservicio: Funding Analytics
+  # ------------------------
+  funding_analytics:
+    build: ./microservices/funding-analytics-service
+    container_name: tfh-funding-analytics
+    restart: unless-stopped
+    environment:
+      MONGO_URI: mongodb://root:example@mongo:27017
+      MONGO_DB: tfh
+      PORT: 8002
+    depends_on:
+      - mongo
+    ports:
+      - "8002:8002"
+
+  # ------------------------
+  # API Gateway
+  # ------------------------
+  api_gateway:
+    build: ./api-gateway
+    container_name: tfh-api-gateway
+    restart: unless-stopped
+    environment:
+      # Estos hosts son los nombres de servicio de Docker
+      DATA_INGESTION_URL: http://data_ingestion:8001
+      FUNDING_ANALYTICS_URL: http://funding_analytics:8002
+      PORT: 3000
+    depends_on:
+      - data_ingestion
+      - funding_analytics
+    ports:
+      - "3000:3000"
+
+  # ------------------------
+  # Frontend estático
+  # ------------------------
+  frontend:
+    image: nginx:alpine
+    container_name: tfh-frontend
+    restart: unless-stopped
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      - api_gateway
 
 volumes:
   mongo_data:
