@@ -1,5 +1,4 @@
 import os
-import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -7,27 +6,27 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from motor.motor_asyncio import AsyncIOMotorClient
 
-from adapters.hyperliquid import HyperliquidAdapter
 from adapters.backpack import BackpackAdapter
+from adapters.hyperliquid import HyperliquidAdapter
 
 load_dotenv()
 
 app = FastAPI(
     title="Data Ingestion Service",
     description="Microservicio para la ingestión de funding rates y su histórico.",
-    version="0.3.0",
+    version="0.2.0",
+    openapi_url="/openapi.json",
 )
 
-# --- Config Mongo ---
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://root:example@localhost:27017")
+# -------------------------
+# Configuración Mongo
+# -------------------------
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://root:example@mongo:27017")
 MONGO_DB = os.getenv("MONGO_DB", "tfh")
 
 COL_HYPER_CURRENT = "funding_hyperliquid_current"
 COL_BACKPACK_CURRENT = "funding_backpack_current"
 COL_FUNDING_TS = "funding_timeseries"
-
-# --- Config cron de refresco ---
-REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", "300"))
 
 mongo_client: Optional[AsyncIOMotorClient] = None
 db = None
@@ -35,35 +34,114 @@ hyper_current_col = None
 backpack_current_col = None
 funding_ts_col = None
 
-background_task: Optional[asyncio.Task] = None
-
-# --- Adapters ---
 hyper_adapter = HyperliquidAdapter()
 backpack_adapter = BackpackAdapter()
 
+FUNDING_INTERVAL_HOURS_DEFAULT = 8.0
 
-# ---------- HELPERS DE TIEMPO / APR ----------
+
+# -------------------------
+# Helpers
+# -------------------------
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def apr_from_funding(funding_rate_8h: float) -> float:
+def canonical_symbol_from_snapshot(snap: Dict[str, Any]) -> str:
     """
-    funding_rate_8h en tanto por uno (ej: 0.0001 == 0.01% por periodo de 8h).
-    APR = rate * 3 * 365 * 100
+    Intenta generar un canonical_symbol común entre exchanges.
+
+    Ejemplos:
+      - Backpack:  "kLUNC_USDC_PERP" -> "kLUNC"
+      - Backpack:  "BTC_USDC_PERP"   -> "BTC"
+      - Hyper:     "kLUNC-USD"       -> "kLUNC"
+      - Hyper:     "BTC-USD"         -> "BTC"
+      - Si no se reconoce, devuelve symbol tal cual.
     """
-    return funding_rate_8h * 3 * 365 * 100.0
+    symbol = str(snap.get("symbol") or "")
+
+    # Hyperliquid suele usar 'ASSET-USD'
+    if symbol.endswith("-USD"):
+        return symbol[:-4]
+
+    # Backpack suele usar 'ASSET_USDC_PERP'
+    if symbol.endswith("_USDC_PERP"):
+        return symbol.replace("_USDC_PERP", "")
+
+    if symbol.endswith("_PERP"):
+        return symbol[:-5]
+
+    return symbol
 
 
-# ---------- MONGO STARTUP / SHUTDOWN ----------
+async def insert_funding_timeseries(snapshot: Dict[str, Any]) -> None:
+    """
+    Inserta una fila en funding_timeseries con campos normalizados.
+    """
+    if funding_ts_col is None:
+        raise RuntimeError("Mongo funding_ts_col not initialized")
+
+    funding_rate = float(snapshot.get("funding_rate") or 0.0)
+    timestamp = snapshot.get("timestamp") or now_utc()
+
+    doc = {
+        "exchange": snapshot.get("exchange"),
+        "symbol": snapshot.get("symbol"),
+        "canonical_symbol": snapshot.get("canonical_symbol"),
+        "funding_rate": funding_rate,
+        "funding_interval_hours": float(
+            snapshot.get("funding_interval_hours") or FUNDING_INTERVAL_HOURS_DEFAULT
+        ),
+        "timestamp": timestamp,
+        "mark_price": snapshot.get("mark_price"),
+        "index_price": snapshot.get("index_price") or snapshot.get("oracle_price"),
+        "open_interest": snapshot.get("open_interest"),
+        "raw": snapshot.get("raw"),
+        "inserted_at": now_utc(),
+    }
+
+    await funding_ts_col.insert_one(doc)
+
+
+async def upsert_current_and_ts(col, snapshot: Dict[str, Any]) -> None:
+    """
+    Actualiza la colección *_current y añade entrada en funding_timeseries.
+    """
+    if col is None:
+        raise RuntimeError("Mongo current_col not initialized")
+
+    # canonical_symbol común
+    canonical = snapshot.get("canonical_symbol") or canonical_symbol_from_snapshot(
+        snapshot
+    )
+
+    normalized = {
+        **snapshot,
+        "canonical_symbol": canonical,
+        "funding_rate": float(snapshot.get("funding_rate") or 0.0),
+        "funding_interval_hours": float(
+            snapshot.get("funding_interval_hours") or FUNDING_INTERVAL_HOURS_DEFAULT
+        ),
+        "timestamp": snapshot.get("timestamp") or now_utc(),
+    }
+
+    key = {
+        "exchange": normalized["exchange"],
+        "symbol": normalized["symbol"],
+    }
+
+    await col.update_one(key, {"$set": normalized}, upsert=True)
+    await insert_funding_timeseries(normalized)
+
+
+# -------------------------
+# Eventos de arranque
+# -------------------------
 
 @app.on_event("startup")
 async def startup_event():
-    """
-    Inicializa cliente de Mongo y colecciones + arranca el loop periódico.
-    """
-    global mongo_client, db, hyper_current_col, backpack_current_col, funding_ts_col, background_task
+    global mongo_client, db, hyper_current_col, backpack_current_col, funding_ts_col
 
     mongo_client = AsyncIOMotorClient(MONGO_URI)
     db = mongo_client[MONGO_DB]
@@ -72,240 +150,213 @@ async def startup_event():
     backpack_current_col = db[COL_BACKPACK_CURRENT]
     funding_ts_col = db[COL_FUNDING_TS]
 
-    # Índices recomendados para la colección histórica
+    # Índices básicos para histórico
     try:
         await funding_ts_col.create_index(
             [("canonical_symbol", 1), ("exchange", 1), ("timestamp", -1)]
         )
         await funding_ts_col.create_index([("timestamp", -1)])
     except Exception:
-        # Si ya existen / no podemos crearlos, no rompemos el servicio
         pass
-
-    # Arrancar el loop periódico
-    background_task = asyncio.create_task(periodic_refresh_loop())
-    print(
-        f"[data-ingestion] Started periodic refresh loop "
-        f"every {REFRESH_INTERVAL_SECONDS} seconds"
-    )
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """
-    Cierra cliente de Mongo y para el loop periódico.
-    """
-    global mongo_client, background_task
-
-    if background_task is not None:
-        background_task.cancel()
-        try:
-            await background_task
-        except asyncio.CancelledError:
-            pass
-
+    global mongo_client
     if mongo_client is not None:
         mongo_client.close()
 
 
+# -------------------------
+# Endpoints
+# -------------------------
+
 @app.get("/status", response_model=dict)
 async def get_status():
-    """
-    Estado simple del microservicio.
-    """
     return {
         "status": "ok",
         "service": "data-ingestion",
-        "version": "0.3.0",
-        "refresh_interval_seconds": REFRESH_INTERVAL_SECONDS,
+        "version": "0.2.0",
+        "timestamp": now_utc().isoformat(),
     }
 
 
-# ---------- INSERCIÓN EN HISTÓRICO ----------
-
-async def insert_funding_timeseries(snapshot: Dict[str, Any]) -> None:
+@app.post("/backpack/refresh", response_model=dict)
+async def refresh_backpack():
     """
-    Inserta un documento en funding_timeseries a partir de un snapshot normalizado.
-
-    Campos esperados en snapshot:
-      - exchange
-      - symbol
-      - canonical_symbol (opcional)
-      - funding_rate
-      - timestamp (datetime)
-      - mark_price (opcional)
-      - index_price / oracle_price (opcional)
-      - open_interest (opcional)
-    """
-    if funding_ts_col is None:
-        raise RuntimeError("Mongo funding_ts_col not initialized")
-
-    doc = {
-        "exchange": snapshot["exchange"],
-        "symbol": snapshot["symbol"],
-        "canonical_symbol": snapshot.get("canonical_symbol"),
-
-        "funding_rate": float(snapshot["funding_rate"]),
-        "funding_interval_hours": 8,  # tanto Hyperliquid como Backpack usan 8h
-
-        "mark_price": snapshot.get("mark_price"),
-        # preferimos index_price si viene, si no oracle_price
-        "index_price": snapshot.get("index_price") or snapshot.get("oracle_price"),
-        "open_interest": snapshot.get("open_interest"),
-
-        "timestamp": snapshot["timestamp"],
-        "inserted_at": now_utc(),
-    }
-
-    await funding_ts_col.insert_one(doc)
-
-
-async def upsert_current_and_ts(
-    current_col,
-    snapshot: Dict[str, Any],
-) -> None:
-    """
-    Actualiza la colección *_current y añade entrada en funding_timeseries.
-    """
-    if current_col is None:
-        raise RuntimeError("Mongo current_col not initialized")
-
-    key = {
-        "exchange": snapshot["exchange"],
-        "symbol": snapshot["symbol"],
-    }
-
-    # Normalizamos algunos campos mínimos
-    normalized = {
-        **snapshot,
-        "funding_rate": float(snapshot["funding_rate"]),
-    }
-
-    await current_col.update_one(
-        key,
-        {"$set": normalized},
-        upsert=True,
-    )
-
-    await insert_funding_timeseries(normalized)
-
-
-# ---------- LÓGICA INTERNA DE REFRESCO ----------
-
-async def _refresh_backpack_internal() -> Dict[str, Any]:
-    """
-    Lógica común para Backpack: usada por el endpoint y por el cron.
+    Refresca TODOS los mercados perp de Backpack y guarda:
+      - funding_backpack_current
+      - funding_timeseries
     """
     if backpack_current_col is None:
-        raise RuntimeError("Mongo backpack_current_col not initialized")
+        raise HTTPException(500, "Mongo not initialized")
 
     try:
         snapshots: List[Dict[str, Any]] = await backpack_adapter.get_all_market_data()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Error calling Backpack API: {e}")
+        raise HTTPException(502, f"Error calling Backpack API: {e}")
 
-    inserted = 0
+    ok = 0
     for snap in snapshots:
         try:
+            snap["exchange"] = "Backpack"
             await upsert_current_and_ts(backpack_current_col, snap)
-            inserted += 1
+            ok += 1
         except Exception:
-            # en producción, loguear símbolo concreto
+            # en producción: log
             continue
 
     return {
         "exchange": "Backpack",
         "markets_processed": len(snapshots),
-        "successful": inserted,
+        "successful": ok,
     }
 
 
-async def _refresh_hyperliquid_internal() -> Dict[str, Any]:
+
+@app.post("/hyperliquid/refresh", response_model=dict)
+async def refresh_hyperliquid():
     """
-    Lógica común para Hyperliquid: usada por el endpoint y por el cron.
+    Refresca TODOS los mercados perp de Hyperliquid y guarda:
+      - funding_hyperliquid_current
+      - funding_timeseries
     """
     if hyper_current_col is None:
-        raise RuntimeError("Mongo hyper_current_col not initialized")
+        raise HTTPException(500, "Mongo not initialized")
 
     try:
         snapshots: List[Dict[str, Any]] = await hyper_adapter.get_all_market_data()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Error calling Hyperliquid API: {e}")
+        raise HTTPException(502, f"Error calling Hyperliquid API: {e}")
 
-    inserted = 0
+    ok = 0
     for snap in snapshots:
         try:
+            snap["exchange"] = "Hyperliquid"
             await upsert_current_and_ts(hyper_current_col, snap)
-            inserted += 1
+            ok += 1
         except Exception:
             continue
 
     return {
         "exchange": "Hyperliquid",
         "markets_processed": len(snapshots),
-        "successful": inserted,
+        "successful": ok,
     }
 
-
-# ---------- LOOP PERIÓDICO ----------
-
-async def periodic_refresh_loop() -> None:
+#############################
+@app.post("/refresh/grouped-by-token", response_model=dict)
+async def refresh_grouped_by_token() -> Dict[str, Dict[str, Any]]:
     """
-    Loop en background que refresca periódicamente Hyperliquid + Backpack.
+    Llama a TODOS los exchanges soportados (por ahora Backpack + Hyperliquid),
+    obtiene los snapshots de mercado y devuelve un JSON agrupado por token.
+
+    Estructura de salida:
+    {
+      "BTC": {
+        "Backpack": {
+          "exchange": "Backpack",
+          "symbol": "BTC_USDC_PERP",
+          "funding_rate": ...,
+          "timestamp": ...,
+          "open_interest": ...,
+          "volume_24h": ...,
+          "price": ...
+        },
+        "Hyperliquid": {
+          "exchange": "Hyperliquid",
+          "symbol": "BTC-USD",
+          ...
+        }
+      },
+      "MERL": {
+        "Hyperliquid": { ... }
+      },
+      ...
+    }
     """
-    while True:
-        try:
-            start = now_utc()
-            print(f"[data-ingestion] Periodic refresh tick at {start.isoformat()}")
 
-            # Backpack
-            try:
-                backpack_summary = await _refresh_backpack_internal()
-                print(f"[data-ingestion] Backpack refresh: {backpack_summary}")
-            except HTTPException as e:
-                print(f"[data-ingestion] Backpack refresh error: {e.detail}")
-            except Exception as e:
-                print(f"[data-ingestion] Backpack refresh error: {e}")
+    grouped: Dict[str, Dict[str, Any]] = {}
 
-            # Hyperliquid
-            try:
-                hyper_summary = await _refresh_hyperliquid_internal()
-                print(f"[data-ingestion] Hyperliquid refresh: {hyper_summary}")
-            except HTTPException as e:
-                print(f"[data-ingestion] Hyperliquid refresh error: {e.detail}")
-            except Exception as e:
-                print(f"[data-ingestion] Hyperliquid refresh error: {e}")
+    # -------- Backpack --------
+    try:
+        backpack_markets: List[Dict[str, Any]] = await backpack_adapter.get_all_market_data()
+    except Exception as e:
+        backpack_markets = []
+        print(f"Error al leer Backpack: {e}")
 
-        except Exception as e:
-            # Protección extra por si algo raro burbujea
-            print(f"[data-ingestion] Unexpected error in periodic loop: {e}")
+    for snap in backpack_markets:
+        token = canonical_symbol_from_snapshot(snap)
+        if not token:
+            continue
 
-        await asyncio.sleep(REFRESH_INTERVAL_SECONDS)
+        exchange_name = "Backpack"
+
+        price = (
+            snap.get("mark_price")
+            or snap.get("index_price")
+            or snap.get("oracle_price")
+        )
+
+        payload = {
+            "exchange": exchange_name,
+            "symbol": snap.get("symbol"),
+            "funding_rate": snap.get("funding_rate"),
+            "timestamp": snap.get("timestamp"),
+            "open_interest": snap.get("open_interest"),
+            "volume_24h": snap.get("volume_24h"),
+            "price": price,
+        }
+
+        if token not in grouped:
+            grouped[token] = {}
+        grouped[token][exchange_name] = payload
+
+    # -------- Hyperliquid --------
+    try:
+        hyper_markets: List[Dict[str, Any]] = await hyper_adapter.get_all_market_data()
+    except Exception as e:
+        hyper_markets = []
+        print(f"Error al leer Hyperliquid: {e}")
+
+    for snap in hyper_markets:
+        token = canonical_symbol_from_snapshot(snap)
+        if not token:
+            continue
+
+        exchange_name = "Hyperliquid"
+
+        price = (
+            snap.get("mark_price")
+            or snap.get("index_price")
+            or snap.get("oracle_price")
+        )
+
+        payload = {
+            "exchange": exchange_name,
+            "symbol": snap.get("symbol"),
+            "funding_rate": snap.get("funding_rate"),
+            "timestamp": snap.get("timestamp"),
+            "open_interest": snap.get("open_interest"),
+            "volume_24h": snap.get("volume_24h"),
+            "price": price,
+        }
+
+        if token not in grouped:
+            grouped[token] = {}
+        grouped[token][exchange_name] = payload
+
+    return grouped
 
 
-# ---------- ENDPOINTS DE REFRESH MANUAL ----------
-
-@app.post("/backpack/refresh", response_model=dict)
-async def refresh_backpack():
-    """
-    Refresca TODOS los mercados perp de Backpack de forma manual.
-    """
-    summary = await _refresh_backpack_internal()
-    return summary
 
 
-@app.post("/hyperliquid/refresh", response_model=dict)
-async def refresh_hyperliquid():
-    """
-    Refresca TODOS los mercados perp de Hyperliquid de forma manual.
-    """
-    summary = await _refresh_hyperliquid_internal()
-    return summary
-
-
-# ---------- ARRANQUE LOCAL ----------
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8001)))
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8001)),
+    )
