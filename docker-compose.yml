@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   # ------------------------
   # Bases de datos
@@ -40,6 +38,7 @@ services:
       MONGO_URI: mongodb://root:example@mongo:27017
       MONGO_DB: tfh
       PORT: 8001
+      REFRESH_INTERVAL_SECONDS: 300   # 👈 CRON CADA 5 MINUTOS
     depends_on:
       - mongo
     ports:
@@ -69,7 +68,6 @@ services:
     container_name: tfh-api-gateway
     restart: unless-stopped
     environment:
-      # Estos hosts son los nombres de servicio de Docker
       DATA_INGESTION_URL: http://data_ingestion:8001
       FUNDING_ANALYTICS_URL: http://funding_analytics:8002
       PORT: 3000
