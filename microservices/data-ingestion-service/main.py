@@ -1,5 +1,6 @@
 import os
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -8,13 +9,18 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from adapters.backpack import BackpackAdapter
 from adapters.hyperliquid import HyperliquidAdapter
+from funding_history import (
+    BASE_INTERVAL_HOURS,
+    aggregate_to_8h,
+    fetch_raw_funding_history,
+)
 
 load_dotenv()
 
 app = FastAPI(
     title="Data Ingestion Service",
     description="Microservicio para la ingestión de funding rates y su histórico.",
-    version="0.2.0",
+    version="0.3.0",
     openapi_url="/openapi.json",
 )
 
@@ -37,7 +43,7 @@ funding_ts_col = None
 hyper_adapter = HyperliquidAdapter()
 backpack_adapter = BackpackAdapter()
 
-FUNDING_INTERVAL_HOURS_DEFAULT = 8.0
+FUNDING_INTERVAL_HOURS_DEFAULT = BASE_INTERVAL_HOURS
 
 
 # -------------------------
@@ -135,6 +141,186 @@ async def upsert_current_and_ts(col, snapshot: Dict[str, Any]) -> None:
     await insert_funding_timeseries(normalized)
 
 
+async def _list_symbols_for_exchange(exchange_name: str) -> List[str]:
+    """
+    Devuelve la lista de sИmbolos normalizados para un exchange usando el adapter o la colecciИn *_current.
+    """
+    exchange = exchange_name.lower()
+    symbols: List[str] = []
+
+    try:
+        if exchange == "backpack":
+            markets = await backpack_adapter.get_markets()
+            symbols = [m.get("symbol") for m in markets if m.get("symbol")]
+        elif exchange == "hyperliquid":
+            markets = await hyper_adapter.get_markets()
+            symbols = [m.get("symbol") for m in markets if m.get("symbol")]
+    except Exception:
+        symbols = []
+
+    # Fallback a colecciones *_current si no hay markets
+    if not symbols:
+        try:
+            col = backpack_current_col if exchange == "backpack" else hyper_current_col
+            if col is not None:
+                symbols = await col.distinct("symbol")
+        except Exception:
+            symbols = []
+
+    # Quitamos duplicados manteniendo orden
+    seen = set()
+    deduped = []
+    for s in symbols:
+        if s in seen:
+            continue
+        seen.add(s)
+        deduped.append(s)
+    return deduped
+
+
+async def _bootstrap_funding_history_internal(days: int = 30) -> Dict[str, Any]:
+    """
+    Descarga histИrico de funding para cada exchange/sИmbolo y lo guarda en funding_timeseries (normalizado a 8h).
+    """
+    if funding_ts_col is None:
+        raise HTTPException(500, "Mongo funding_timeseries not initialized")
+
+    to_ts = now_utc()
+    from_ts = to_ts - timedelta(days=days)
+    summary: List[Dict[str, Any]] = []
+
+    exchanges = [
+        ("Hyperliquid", hyper_adapter, hyper_current_col),
+        ("Backpack", backpack_adapter, backpack_current_col),
+    ]
+
+    for exchange_name, _adapter, _col in exchanges:
+        symbols = await _list_symbols_for_exchange(exchange_name)
+        inserted = 0
+
+        for symbol in symbols:
+            try:
+                raw_events = await fetch_raw_funding_history(
+                    exchange_name, symbol, from_ts, to_ts
+                )
+            except Exception:
+                continue
+
+            snapshots = aggregate_to_8h(raw_events)
+            docs: List[Dict[str, Any]] = []
+            canonical = canonical_symbol_from_snapshot({"symbol": symbol})
+
+            for snap in snapshots:
+                docs.append(
+                    {
+                        "exchange": exchange_name,
+                        "symbol": symbol,
+                        "canonical_symbol": canonical,
+                        "funding_rate": float(snap.get("funding_rate") or 0.0),
+                        "funding_interval_hours": float(
+                            snap.get("funding_interval_hours")
+                            or FUNDING_INTERVAL_HOURS_DEFAULT
+                        ),
+                        "mark_price": snap.get("mark_price"),
+                        "open_interest": snap.get("open_interest"),
+                        "volume_24h": snap.get("volume_24h"),
+                        "timestamp": snap.get("timestamp") or to_ts,
+                        "inserted_at": now_utc(),
+                    }
+                )
+
+            if docs:
+                try:
+                    await funding_ts_col.insert_many(docs, ordered=False)
+                    inserted += len(docs)
+                except Exception:
+                    # Si hay duplicados o errores, seguimos con el resto
+                    pass
+
+        summary.append(
+            {
+                "exchange": exchange_name,
+                "symbols_processed": len(symbols),
+                "snapshots_inserted": inserted,
+            }
+        )
+
+    return {
+        "status": "ok",
+        "days": days,
+        "run_at": to_ts.isoformat(),
+        "exchanges": summary,
+    }
+
+
+async def _maybe_bootstrap_on_startup():
+    """
+    Si funding_timeseries esta vacio o desactualizado, lanza bootstrap automatico (30 dias).
+    """
+    if funding_ts_col is None:
+        return
+
+    try:
+        last = await funding_ts_col.find_one(sort=[("timestamp", -1)])
+    except Exception:
+        last = None
+
+    now = now_utc()
+    last_ts = None
+    if last:
+        last_ts = last.get("timestamp")
+        if isinstance(last_ts, datetime) and last_ts.tzinfo is None:
+            last_ts = last_ts.replace(tzinfo=timezone.utc)
+
+    if not last_ts or last_ts < now - timedelta(days=3):
+        print("[startup] No recent funding_timeseries, bootstrapping 30 days...", flush=True)
+        try:
+            await _bootstrap_funding_history_internal(days=30)
+            print("[startup] Bootstrap finished", flush=True)
+        except Exception:
+            # en produccion se loggearia
+            pass
+    else:
+        print("[startup] funding_timeseries is recent, skipping bootstrap", flush=True)
+
+
+async def _funding_hourly_refresh_internal() -> Dict[str, Any]:
+    """
+    Wrapper para refrescos horarios (cron).
+    """
+    results = []
+
+    try:
+        res_bp = await refresh_backpack()
+        results.append({"exchange": "Backpack", **res_bp})
+    except Exception as e:
+        results.append({"exchange": "Backpack", "error": str(e)})
+
+    try:
+        res_hl = await refresh_hyperliquid()
+        results.append({"exchange": "Hyperliquid", **res_hl})
+    except Exception as e:
+        results.append({"exchange": "Hyperliquid", "error": str(e)})
+
+    return {
+        "status": "ok",
+        "run_at": now_utc().isoformat(),
+        "exchanges": results,
+    }
+
+
+async def _hourly_loop_task():
+    """
+    Tarea de fondo para refresco horario.
+    """
+    while True:
+        try:
+            await _funding_hourly_refresh_internal()
+        except Exception:
+            pass
+        await asyncio.sleep(3600)
+
+
 # -------------------------
 # Eventos de arranque
 # -------------------------
@@ -159,6 +345,10 @@ async def startup_event():
     except Exception:
         pass
 
+    await _maybe_bootstrap_on_startup()
+    asyncio.create_task(_hourly_loop_task())
+    print("[startup] data-ingestion-service ready", flush=True)
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -176,9 +366,23 @@ async def get_status():
     return {
         "status": "ok",
         "service": "data-ingestion",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "timestamp": now_utc().isoformat(),
     }
+
+
+@app.post("/funding/bootstrap-history", response_model=dict)
+async def bootstrap_funding_history(days: int = 30):
+    """
+    Descarga histИrico de funding (days dУas hacia atrаs), lo normaliza a 8h y lo guarda en funding_timeseries.
+    Pensado para llamarse al arrancar la plataforma.
+    """
+    try:
+        return await _bootstrap_funding_history_internal(days=days)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error en bootstrap de histИrico: {e}")
 
 
 @app.post("/backpack/refresh", response_model=dict)
@@ -243,6 +447,20 @@ async def refresh_hyperliquid():
         "markets_processed": len(snapshots),
         "successful": ok,
     }
+
+
+@app.post("/funding/hourly-refresh", response_model=dict)
+async def funding_hourly_refresh():
+    """
+    Wrapper pensado para cron: refresca todos los exchanges y guarda snapshot en funding_timeseries.
+    """
+    try:
+        return await _funding_hourly_refresh_internal()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error en refresco horario: {e}")
+
 
 #############################
 @app.post("/refresh/grouped-by-token", response_model=dict)

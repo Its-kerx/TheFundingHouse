@@ -1,6 +1,7 @@
 import os
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Set, Tuple
+from itertools import combinations
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
@@ -11,7 +12,7 @@ load_dotenv()
 app = FastAPI(
     title="Funding Analytics Service",
     description="Microservicio para analizar funding/APR a partir de Mongo.",
-    version="0.4.0",
+    version="0.5.0",
     openapi_url="/openapi.json",
 )
 
@@ -25,12 +26,14 @@ MONGO_DB = os.getenv("MONGO_DB", "tfh")
 COL_HYPER_CURRENT = "funding_hyperliquid_current"
 COL_BACKPACK_CURRENT = "funding_backpack_current"
 COL_FUNDING_TS = "funding_timeseries"
+COL_FUNDING_PAIRS_TS = "funding_arbitrage_pairs_ts"
 
 mongo_client: Optional[AsyncIOMotorClient] = None
 db = None
 hyper_current_col = None
 backpack_current_col = None
 funding_ts_col = None
+funding_pairs_col = None
 
 
 # -------------------------
@@ -75,8 +78,9 @@ def _normalize_live_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     # timestamp del snapshot / funding
     funding_ts = d.get("funding_timestamp") or d.get("timestamp") or now_utc()
 
-    # precio preferente
-    price = d.get("price") or d.get("mark_price") or d.get("index_price")
+    mark_price = d.get("mark_price") or d.get("price")
+    index_price = d.get("index_price")
+    price = d.get("price") or mark_price or index_price
 
     open_interest = d.get("open_interest")
     volume_24h = d.get("volume_24h")
@@ -91,9 +95,12 @@ def _normalize_live_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
         "funding_rate": funding_rate,
         "funding_interval_hours": interval,
         "funding_timestamp": funding_ts,
+        "timestamp": funding_ts,
         "open_interest": open_interest,
         "volume_24h": volume_24h,
         "price": price,
+        "mark_price": mark_price,
+        "index_price": index_price,
         "apr_percent": apr,
         "abs_apr_percent": abs_apr,
     }
@@ -115,149 +122,210 @@ async def _fetch_all_current_docs() -> List[Dict[str, Any]]:
     return [_normalize_live_doc(d) for d in docs]
 
 
-# -------------------------
-# Helpers de ventanas (histórico)
-# -------------------------
-
-async def _aggregate_window_hours(
-    window_hours: float,
+async def compute_arbitrage_pairs(
+    docs: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
-    Agrega funding en la colección funding_timeseries en una ventana
-    [now - window_hours, now].
-
-    Para cada (exchange, symbol) calcula:
-        - funding_rate = media de funding_rate en esa ventana
-        - funding_timestamp = timestamp del último doc
-        - price, open_interest, volume_24h = del último doc
-        - apr_percent = APR anualizado a partir de la media de funding_rate
+    Genera todas las combinaciones de pares por canonical_symbol.
+    LONG = APR mケs bajo; SHORT = APR mケs alto.
     """
-    if funding_ts_col is None:
-        raise RuntimeError("Mongo funding_timeseries not initialized")
-
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
     now = now_utc()
-    since = now - timedelta(hours=window_hours)
 
-    cursor = funding_ts_col.find({"timestamp": {"$gte": since}})
-
-    rows: List[Dict[str, Any]] = await cursor.to_list(length=100_000)
-
-    by_key: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-    for r in rows:
-        r = dict(r)
-        r.pop("_id", None)
-        key = (r.get("exchange"), r.get("symbol"))
-        by_key.setdefault(key, []).append(r)
+    for d in docs:
+        c_symbol = d.get("canonical_symbol") or d.get("symbol")
+        exchange = d.get("exchange")
+        if not c_symbol or not exchange:
+            continue
+        grouped.setdefault(c_symbol, []).append(d)
 
     results: List[Dict[str, Any]] = []
 
-    for (exchange, symbol), items in by_key.items():
-        if not exchange or not symbol:
+    for canonical_symbol, items in grouped.items():
+        latest_by_exchange: Dict[str, Dict[str, Any]] = {}
+        for it in items:
+            ex = it.get("exchange")
+            if not ex:
+                continue
+            ts_it = it.get("timestamp") or it.get("funding_timestamp") or now
+            existing = latest_by_exchange.get(ex)
+            if existing:
+                ts_existing = (
+                    existing.get("timestamp")
+                    or existing.get("funding_timestamp")
+                    or now
+                )
+                if ts_existing >= ts_it:
+                    continue
+            latest_by_exchange[ex] = it
+
+        exchanges = sorted(latest_by_exchange.keys())
+        if len(exchanges) < 2:
             continue
 
-        items_sorted = sorted(items, key=lambda x: x.get("timestamp", now))
-        last = items_sorted[-1]
+        for ex_a, ex_b in combinations(exchanges, 2):
+            doc_a = latest_by_exchange.get(ex_a)
+            doc_b = latest_by_exchange.get(ex_b)
+            if not doc_a or not doc_b:
+                continue
 
-        canonical_symbol = last.get("canonical_symbol") or symbol
+            apr_a = float(doc_a.get("apr_percent") or 0.0)
+            apr_b = float(doc_b.get("apr_percent") or 0.0)
 
-        # funding_rate medio en la ventana
-        funding_values = [float(it.get("funding_rate") or 0.0) for it in items_sorted]
-        if not funding_values:
-            continue
+            if apr_a <= apr_b:
+                long_doc = doc_a
+                short_doc = doc_b
+            else:
+                long_doc = doc_b
+                short_doc = doc_a
 
-        mean_funding = sum(funding_values) / float(len(funding_values))
+            apr_long = float(long_doc.get("apr_percent") or 0.0)
+            apr_short = float(short_doc.get("apr_percent") or 0.0)
+            spread = apr_short - apr_long
 
-        interval = float(last.get("funding_interval_hours") or 8.0)
-        apr = annualize_funding(mean_funding, interval)
-        abs_apr = abs(apr)
+            ts_a = doc_a.get("timestamp") or doc_a.get("funding_timestamp") or now
+            ts_b = doc_b.get("timestamp") or doc_b.get("funding_timestamp") or now
+            pair_ts = max(ts_a, ts_b)
 
-        price = (
-            last.get("price")
-            or last.get("mark_price")
-            or last.get("index_price")
-        )
+            ex1, ex2 = sorted([ex_a, ex_b])
+            pair_id = f"{canonical_symbol}:{ex1}-{ex2}"
 
-        doc_norm = {
-            "exchange": exchange,
-            "symbol": symbol,
-            "canonical_symbol": canonical_symbol,
-            "funding_rate": mean_funding,
-            "funding_interval_hours": interval,
-            "funding_timestamp": last.get("timestamp") or now,
-            "open_interest": last.get("open_interest"),
-            "volume_24h": last.get("volume_24h"),
-            "price": price,
-            "apr_percent": apr,
-            "abs_apr_percent": abs_apr,
-            "samples": len(items_sorted),
-            "window_hours": window_hours,
-        }
-        results.append(doc_norm)
+            results.append(
+                {
+                    "pair_id": pair_id,
+                    "canonical_symbol": canonical_symbol,
+                    "timestamp": pair_ts,
+                    "spread_apr_percent": spread,
+                    "long_market": {
+                        "exchange": long_doc.get("exchange"),
+                        "symbol": long_doc.get("symbol"),
+                        "funding_rate": float(long_doc.get("funding_rate") or 0.0),
+                        "apr_percent": apr_long,
+                        "mark_price": long_doc.get("mark_price") or long_doc.get("price"),
+                        "open_interest": long_doc.get("open_interest"),
+                        "volume_24h": long_doc.get("volume_24h"),
+                        "last_updated": (
+                            long_doc.get("timestamp")
+                            or long_doc.get("funding_timestamp")
+                            or pair_ts
+                        ),
+                    },
+                    "short_market": {
+                        "exchange": short_doc.get("exchange"),
+                        "symbol": short_doc.get("symbol"),
+                        "funding_rate": float(short_doc.get("funding_rate") or 0.0),
+                        "apr_percent": apr_short,
+                        "mark_price": short_doc.get("mark_price")
+                        or short_doc.get("price"),
+                        "open_interest": short_doc.get("open_interest"),
+                        "volume_24h": short_doc.get("volume_24h"),
+                        "last_updated": (
+                            short_doc.get("timestamp")
+                            or short_doc.get("funding_timestamp")
+                            or pair_ts
+                        ),
+                    },
+                }
+            )
 
     return results
 
 
-async def _funding_window_endpoint(
-    window_hours: float,
-    exchange: Optional[str],
-    canonical_symbol: Optional[str],
-    min_abs_apr_percent: float,
-    limit: int,
+# -------------------------
+# Helpers de ventanas (histórico de pares)
+# -------------------------
+
+def _filter_pairs(
+    pairs: List[Dict[str, Any]],
+    min_spread_apr_percent: float = 0.0,
+    canonical_symbol: Optional[str] = None,
+    exchange_in: Optional[List[str]] = None,
+    exchange_out: Optional[List[str]] = None,
+    limit: int = 100,
 ) -> List[Dict[str, Any]]:
-    try:
-        docs = await _aggregate_window_hours(window_hours)
-    except Exception as e:
-        raise HTTPException(500, f"Error leyendo histórico Mongo: {e}")
+    allow_set = set(exchange_in) if exchange_in else None
+    block_set = set(exchange_out) if exchange_out else None
 
-    if exchange:
-        docs = [d for d in docs if d.get("exchange") == exchange]
+    filtered: List[Dict[str, Any]] = []
+    for p in pairs:
+        spread = float(p.get("spread_apr_percent") or 0.0)
+        if spread < min_spread_apr_percent:
+            continue
 
-    if canonical_symbol:
-        docs = [d for d in docs if d.get("canonical_symbol") == canonical_symbol]
+        if canonical_symbol and p.get("canonical_symbol") != canonical_symbol:
+            continue
 
-    if min_abs_apr_percent > 0.0:
-        docs = [
-            d
-            for d in docs
-            if float(d.get("abs_apr_percent") or 0.0) >= min_abs_apr_percent
-        ]
+        long_ex = (p.get("long_market") or {}).get("exchange")
+        short_ex = (p.get("short_market") or {}).get("exchange")
 
-    docs.sort(key=lambda d: d.get("abs_apr_percent", 0.0), reverse=True)
+        if allow_set is not None:
+            if long_ex not in allow_set or short_ex not in allow_set:
+                continue
 
-    # Quitamos los campos internos que no quieres ver en frontend
-    cleaned: List[Dict[str, Any]] = []
-    for d in docs[:limit]:
-        cleaned.append(
-            {
-                "exchange": d["exchange"],
-                "symbol": d["symbol"],
-                "canonical_symbol": d["canonical_symbol"],
-                "funding_rate": d["funding_rate"],
-                "funding_timestamp": d["funding_timestamp"],
-                "open_interest": d.get("open_interest"),
-                "volume_24h": d.get("volume_24h"),
-                "price": d.get("price"),
-                "apr_percent": d["apr_percent"],
-            }
-        )
-    return cleaned
+        if block_set is not None and (long_ex in block_set or short_ex in block_set):
+            continue
+
+        p_clean = dict(p)
+        p_clean.pop("_id", None)
+        filtered.append(p_clean)
+
+    filtered.sort(
+        key=lambda r: (
+            float(r.get("spread_apr_percent") or 0.0),
+            r.get("timestamp") or datetime.min,
+        ),
+        reverse=True,
+    )
+    return filtered[:limit]
 
 
-def _clean_live_for_frontend(d: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Quita lo que no quieres ver en la respuesta del snapshot Live.
-    """
-    return {
-        "exchange": d["exchange"],
-        "symbol": d["symbol"],
-        "canonical_symbol": d["canonical_symbol"],
-        "funding_rate": d["funding_rate"],
-        "funding_timestamp": d["funding_timestamp"],
-        "open_interest": d.get("open_interest"),
-        "volume_24h": d.get("volume_24h"),
-        "price": d.get("price"),
-        "apr_percent": d["apr_percent"],
-    }
+async def _compute_live_pairs_filtered(
+    min_spread_apr_percent: float = 0.0,
+    canonical_symbol: Optional[str] = None,
+    exchange_in: Optional[List[str]] = None,
+    exchange_out: Optional[List[str]] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    docs = await _fetch_all_current_docs()
+    pairs = await compute_arbitrage_pairs(docs)
+    return _filter_pairs(
+        pairs,
+        min_spread_apr_percent=min_spread_apr_percent,
+        canonical_symbol=canonical_symbol,
+        exchange_in=exchange_in,
+        exchange_out=exchange_out,
+        limit=limit,
+    )
+
+
+async def get_arbitrage_window(
+    window_hours: float,
+    min_spread_apr_percent: float = 0.0,
+    canonical_symbol: Optional[str] = None,
+    exchange_in: Optional[List[str]] = None,
+    exchange_out: Optional[List[str]] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    if funding_pairs_col is None:
+        raise HTTPException(500, "Mongo collection funding_arbitrage_pairs_ts not initialized")
+
+    from_ts = now_utc() - timedelta(hours=window_hours)
+    cursor = funding_pairs_col.find({"timestamp": {"$gte": from_ts}})
+    docs = await cursor.to_list(length=100_000)
+    pairs: List[Dict[str, Any]] = []
+    for d in docs:
+        d = dict(d)
+        d.pop("_id", None)
+        pairs.append(d)
+
+    return _filter_pairs(
+        pairs,
+        min_spread_apr_percent=min_spread_apr_percent,
+        canonical_symbol=canonical_symbol,
+        exchange_in=exchange_in,
+        exchange_out=exchange_out,
+        limit=limit,
+    )
 
 
 # -------------------------
@@ -266,7 +334,7 @@ def _clean_live_for_frontend(d: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.on_event("startup")
 async def startup_event():
-    global mongo_client, db, hyper_current_col, backpack_current_col, funding_ts_col
+    global mongo_client, db, hyper_current_col, backpack_current_col, funding_ts_col, funding_pairs_col
 
     mongo_client = AsyncIOMotorClient(MONGO_URI)
     db = mongo_client[MONGO_DB]
@@ -274,6 +342,7 @@ async def startup_event():
     hyper_current_col = db[COL_HYPER_CURRENT]
     backpack_current_col = db[COL_BACKPACK_CURRENT]
     funding_ts_col = db[COL_FUNDING_TS]
+    funding_pairs_col = db[COL_FUNDING_PAIRS_TS]
 
 
 @app.on_event("shutdown")
@@ -292,7 +361,7 @@ async def get_status():
     return {
         "status": "ok",
         "service": "funding-analytics",
-        "version": "0.4.0",
+        "version": "0.5.0",
         "timestamp": now_utc().isoformat(),
     }
 
@@ -303,54 +372,75 @@ async def get_status():
 
 @app.get("/funding/live", response_model=List[Dict[str, Any]])
 async def funding_live(
-    exchange: Optional[str] = Query(
-        default=None,
-        description="Filtra por exchange (Hyperliquid, Backpack, ...)",
-    ),
     canonical_symbol: Optional[str] = Query(
         default=None,
         description="Filtra por canonical_symbol (BTC, ETH, PIPE, ...)",
     ),
-    min_abs_apr_percent: float = Query(
+    min_spread_apr_percent: float = Query(
         default=0.0,
         ge=0.0,
-        description="Filtra por |APR| mínimo (ej: 10 => solo |APR|>=10)",
+        description=(
+            "Filtra por spread minimo de APR entre las dos patas del par "
+            "(ej: 20 => solo pares con diferencia >=20 puntos)."
+        ),
+    ),
+    exchange_in: Optional[List[str]] = Query(
+        default=None,
+        description="Si se indica, ambos exchanges deben pertenecer a este conjunto.",
+    ),
+    exchange_out: Optional[List[str]] = Query(
+        default=None,
+        description="Excluye pares que contengan cualquiera de estos exchanges.",
     ),
     limit: int = Query(
-        default=500,
+        default=100,
         ge=1,
         le=5000,
-        description="Máximo número de mercados devueltos",
+        description="Maximo numero de pares devueltos",
     ),
 ):
     """
-    Snapshot actual (colecciones *_current).
+    Calcula en vivo los pares de arbitraje a partir de funding_*_current.
     """
     try:
-        docs = await _fetch_all_current_docs()
+        return await _compute_live_pairs_filtered(
+            min_spread_apr_percent=min_spread_apr_percent,
+            canonical_symbol=canonical_symbol,
+            exchange_in=exchange_in,
+            exchange_out=exchange_out,
+            limit=limit,
+        )
     except Exception as e:
-        raise HTTPException(500, f"Error leyendo Mongo: {e}")
-
-    if exchange:
-        docs = [d for d in docs if d.get("exchange") == exchange]
-
-    if canonical_symbol:
-        docs = [d for d in docs if d.get("canonical_symbol") == canonical_symbol]
-
-    if min_abs_apr_percent > 0.0:
-        docs = [
-            d
-            for d in docs
-            if float(d.get("abs_apr_percent") or 0.0) >= min_abs_apr_percent
-        ]
-
-    docs.sort(key=lambda d: d.get("abs_apr_percent", 0.0), reverse=True)
-    return [_clean_live_for_frontend(d) for d in docs[:limit]]
+        raise HTTPException(500, f"Error calculando arbitraje Live: {e}")
 
 
 # -------------------------
 # Arbitraje de funding
 # -------------------------
+
+
+@app.post("/funding/arbitrage/refresh", response_model=dict)
+async def refresh_arbitrage_pairs():
+    """
+    Recalcula todas las combinaciones de pares y guarda un snapshot en funding_arbitrage_pairs_ts.
+    """
+    try:
+        docs = await _fetch_all_current_docs()
+        pairs = await compute_arbitrage_pairs(docs)
+    except Exception as e:
+        raise HTTPException(500, f"Error calculando pares de arbitraje: {e}")
+
+    if funding_pairs_col is None:
+        raise HTTPException(500, "Mongo collection funding_arbitrage_pairs_ts not initialized")
+
+    if pairs:
+        await funding_pairs_col.insert_many(pairs)
+
+    return {
+        "status": "ok",
+        "pairs_inserted": len(pairs),
+        "timestamp": now_utc().isoformat(),
+    }
 
 
 @app.get("/funding/arbitrage/pairs", response_model=List[Dict[str, Any]])
@@ -359,7 +449,7 @@ async def funding_arbitrage_pairs(
         default=0.0,
         ge=0.0,
         description=(
-            "Mínimo spread de APR entre LONG y SHORT. "
+            "Minimo spread de APR entre LONG y SHORT. "
             "Ej: 20 => solo pares con diferencia de APR >= 20 puntos."
         ),
     ),
@@ -367,242 +457,145 @@ async def funding_arbitrage_pairs(
         default=0.0,
         ge=0.0,
         description=(
-            "Mínimo |APR| que debe tener tanto el lado LONG como el SHORT. "
+            "Minimo |APR| que debe tener tanto el lado LONG como el SHORT. "
             "Ej: 10 => ambos lados deben tener |APR|>=10."
         ),
     ),
     min_oi: float = Query(
         default=0.0,
         ge=0.0,
-        description="Mínimo open interest requerido en ambos lados (0 = sin filtro).",
+        description="Minimo open interest requerido en ambos lados (0 = sin filtro).",
     ),
     min_volume_24h: float = Query(
         default=0.0,
         ge=0.0,
-        description="Mínimo volumen 24h requerido en ambos lados (0 = sin filtro).",
+        description="Minimo volumen 24h requerido en ambos lados (0 = sin filtro).",
     ),
     limit: int = Query(
         default=50,
         ge=1,
         le=1000,
-        description="Número máximo de pares a devolver.",
+        description="Numero maximo de pares a devolver.",
     ),
 ):
     """
-    Busca oportunidades de arbitraje de funding entre exchanges.
-
-    Para cada canonical_symbol con mercados en >=2 exchanges:
-      - LONG: mercado con APR más bajo (más negativo).
-      - SHORT: mercado con APR más alto (más positivo).
-    Calcula spread_apr_percent = apr_short - apr_long y aplica filtros.
+    Busca oportunidades de arbitraje de funding entre exchanges (live).
     """
     try:
-        docs = await _fetch_all_current_docs()
+        prelimit = min(5000, max(limit * 3, limit))
+        pairs = await _compute_live_pairs_filtered(
+            min_spread_apr_percent=min_spread_apr_percent,
+            limit=prelimit,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error leyendo Mongo: {e}")
 
-    groups: Dict[str, List[Dict[str, Any]]] = {}
-    for d in docs:
-        c_symbol = d.get("canonical_symbol") or d.get("symbol")
-        if not c_symbol:
-            continue
-        groups.setdefault(c_symbol, []).append(d)
+    filtered: List[Dict[str, Any]] = []
+    for p in pairs:
+        long_m = p.get("long_market") or {}
+        short_m = p.get("short_market") or {}
 
-    results: List[Dict[str, Any]] = []
-
-    for c_symbol, items in groups.items():
-        exchanges: Set[str] = {i.get("exchange") for i in items}
-        if len(exchanges) < 2:
+        apr_long_abs = abs(float(long_m.get("apr_percent") or 0.0))
+        apr_short_abs = abs(float(short_m.get("apr_percent") or 0.0))
+        if min_abs_apr_each_side > 0.0 and (
+            apr_long_abs < min_abs_apr_each_side or apr_short_abs < min_abs_apr_each_side
+        ):
             continue
 
-        long_market = min(items, key=lambda x: float(x.get("apr_percent") or 0.0))
-        short_market = max(items, key=lambda x: float(x.get("apr_percent") or 0.0))
-
-        apr_long = float(long_market.get("apr_percent") or 0.0)
-        apr_short = float(short_market.get("apr_percent") or 0.0)
-        spread = apr_short - apr_long
-
-        if spread <= 0:
-            continue
-
-        if abs(apr_long) < min_abs_apr_each_side or abs(apr_short) < min_abs_apr_each_side:
-            continue
-
-        oi_long = float(long_market.get("open_interest") or 0.0)
-        oi_short = float(short_market.get("open_interest") or 0.0)
-        vol_long = float(long_market.get("volume_24h") or 0.0)
-        vol_short = float(short_market.get("volume_24h") or 0.0)
-
+        oi_long = float(long_m.get("open_interest") or 0.0)
+        oi_short = float(short_m.get("open_interest") or 0.0)
         if min_oi > 0.0 and (oi_long < min_oi or oi_short < min_oi):
             continue
 
+        vol_long = float(long_m.get("volume_24h") or 0.0)
+        vol_short = float(short_m.get("volume_24h") or 0.0)
         if min_volume_24h > 0.0 and (vol_long < min_volume_24h or vol_short < min_volume_24h):
             continue
 
-        if spread < min_spread_apr_percent:
-            continue
+        filtered.append(p)
 
-        results.append(
-            {
-                "canonical_symbol": c_symbol,
-                "spread_apr_percent": spread,
-                "long_market": {
-                    "exchange": long_market.get("exchange"),
-                    "symbol": long_market.get("symbol"),
-                    "apr_percent": apr_long,
-                    "funding_rate": float(long_market.get("funding_rate") or 0.0),
-                    "open_interest": oi_long,
-                    "volume_24h": vol_long,
-                },
-                "short_market": {
-                    "exchange": short_market.get("exchange"),
-                    "symbol": short_market.get("symbol"),
-                    "apr_percent": apr_short,
-                    "funding_rate": float(short_market.get("funding_rate") or 0.0),
-                    "open_interest": oi_short,
-                    "volume_24h": vol_short,
-                },
-                "all_markets": items,
-            }
-        )
-
-    results.sort(key=lambda r: r.get("spread_apr_percent", 0.0), reverse=True)
-    return results[:limit]
+    return filtered[:limit]
 
 
 # -------------------------
 # VENTANAS (1h, 8h, 24h, 3d, 7d, 15d, 31d)
 # -------------------------
 
-common_exchange = Query(
-    default=None,
-    description="Filtra por exchange (Hyperliquid, Backpack, ...)",
-)
 common_canonical = Query(
     default=None,
     description="Filtra por canonical_symbol (BTC, ETH, PIPE, ...)",
 )
-common_min_abs_apr = Query(
+common_min_spread = Query(
     default=0.0,
     ge=0.0,
-    description="Filtra por |APR| mínimo (ej: 10 => solo |APR|>=10)",
+    description="Filtra por spread minimo de APR (ej: 20 => spread>=20)",
 )
-common_limit = Query(
-    default=500,
+common_exchange_in = Query(
+    default=None,
+    description="Si se indica, ambos exchanges deben pertenecer a este conjunto.",
+)
+common_exchange_out = Query(
+    default=None,
+    description="Excluye pares que contengan cualquiera de estos exchanges.",
+)
+common_limit_pairs = Query(
+    default=100,
     ge=1,
     le=5000,
-    description="Máximo número de mercados devueltos",
+    description="Maximo numero de pares devueltos",
 )
 
 
 @app.get("/funding/1h", response_model=List[Dict[str, Any]])
 async def funding_1h(
-    exchange: Optional[str] = common_exchange,
     canonical_symbol: Optional[str] = common_canonical,
-    min_abs_apr_percent: float = common_min_abs_apr,
-    limit: int = common_limit,
+    min_spread_apr_percent: float = common_min_spread,
+    exchange_in: Optional[List[str]] = common_exchange_in,
+    exchange_out: Optional[List[str]] = common_exchange_out,
+    limit: int = common_limit_pairs,
 ):
-    return await _funding_window_endpoint(
+    return await get_arbitrage_window(
         window_hours=1.0,
-        exchange=exchange,
+        min_spread_apr_percent=min_spread_apr_percent,
         canonical_symbol=canonical_symbol,
-        min_abs_apr_percent=min_abs_apr_percent,
+        exchange_in=exchange_in,
+        exchange_out=exchange_out,
         limit=limit,
     )
 
 
 @app.get("/funding/8h", response_model=List[Dict[str, Any]])
 async def funding_8h(
-    exchange: Optional[str] = common_exchange,
     canonical_symbol: Optional[str] = common_canonical,
-    min_abs_apr_percent: float = common_min_abs_apr,
-    limit: int = common_limit,
+    min_spread_apr_percent: float = common_min_spread,
+    exchange_in: Optional[List[str]] = common_exchange_in,
+    exchange_out: Optional[List[str]] = common_exchange_out,
+    limit: int = common_limit_pairs,
 ):
-    return await _funding_window_endpoint(
+    return await get_arbitrage_window(
         window_hours=8.0,
-        exchange=exchange,
+        min_spread_apr_percent=min_spread_apr_percent,
         canonical_symbol=canonical_symbol,
-        min_abs_apr_percent=min_abs_apr_percent,
+        exchange_in=exchange_in,
+        exchange_out=exchange_out,
         limit=limit,
     )
 
 
 @app.get("/funding/24h", response_model=List[Dict[str, Any]])
 async def funding_24h(
-    exchange: Optional[str] = common_exchange,
     canonical_symbol: Optional[str] = common_canonical,
-    min_abs_apr_percent: float = common_min_abs_apr,
-    limit: int = common_limit,
+    min_spread_apr_percent: float = common_min_spread,
+    exchange_in: Optional[List[str]] = common_exchange_in,
+    exchange_out: Optional[List[str]] = common_exchange_out,
+    limit: int = common_limit_pairs,
 ):
-    return await _funding_window_endpoint(
+    return await get_arbitrage_window(
         window_hours=24.0,
-        exchange=exchange,
+        min_spread_apr_percent=min_spread_apr_percent,
         canonical_symbol=canonical_symbol,
-        min_abs_apr_percent=min_abs_apr_percent,
-        limit=limit,
-    )
-
-
-@app.get("/funding/3d", response_model=List[Dict[str, Any]])
-async def funding_3d(
-    exchange: Optional[str] = common_exchange,
-    canonical_symbol: Optional[str] = common_canonical,
-    min_abs_apr_percent: float = common_min_abs_apr,
-    limit: int = common_limit,
-):
-    return await _funding_window_endpoint(
-        window_hours=72.0,
-        exchange=exchange,
-        canonical_symbol=canonical_symbol,
-        min_abs_apr_percent=min_abs_apr_percent,
-        limit=limit,
-    )
-
-
-@app.get("/funding/7d", response_model=List[Dict[str, Any]])
-async def funding_7d(
-    exchange: Optional[str] = common_exchange,
-    canonical_symbol: Optional[str] = common_canonical,
-    min_abs_apr_percent: float = common_min_abs_apr,
-    limit: int = common_limit,
-):
-    return await _funding_window_endpoint(
-        window_hours=7 * 24.0,
-        exchange=exchange,
-        canonical_symbol=canonical_symbol,
-        min_abs_apr_percent=min_abs_apr_percent,
-        limit=limit,
-    )
-
-
-@app.get("/funding/15d", response_model=List[Dict[str, Any]])
-async def funding_15d(
-    exchange: Optional[str] = common_exchange,
-    canonical_symbol: Optional[str] = common_canonical,
-    min_abs_apr_percent: float = common_min_abs_apr,
-    limit: int = common_limit,
-):
-    return await _funding_window_endpoint(
-        window_hours=15 * 24.0,
-        exchange=exchange,
-        canonical_symbol=canonical_symbol,
-        min_abs_apr_percent=min_abs_apr_percent,
-        limit=limit,
-    )
-
-
-@app.get("/funding/31d", response_model=List[Dict[str, Any]])
-async def funding_31d(
-    exchange: Optional[str] = common_exchange,
-    canonical_symbol: Optional[str] = common_canonical,
-    min_abs_apr_percent: float = common_min_abs_apr,
-    limit: int = common_limit,
-):
-    return await _funding_window_endpoint(
-        window_hours=31 * 24.0,
-        exchange=exchange,
-        canonical_symbol=canonical_symbol,
-        min_abs_apr_percent=min_abs_apr_percent,
+        exchange_in=exchange_in,
+        exchange_out=exchange_out,
         limit=limit,
     )
 
