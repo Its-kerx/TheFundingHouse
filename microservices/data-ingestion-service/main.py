@@ -476,19 +476,6 @@ async def refresh_hyperliquid():
     }
 
 
-@app.post("/funding/hourly-refresh", response_model=dict)
-async def funding_hourly_refresh():
-    """
-    Wrapper pensado para cron: refresca todos los exchanges y guarda snapshot en funding_timeseries.
-    """
-    try:
-        return await _funding_hourly_refresh_internal()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"Error en refresco horario: {e}")
-
-
 #############################
 @app.post("/refresh/grouped-by-token", response_model=dict)
 async def refresh_grouped_by_token() -> Dict[str, Dict[str, Any]]:

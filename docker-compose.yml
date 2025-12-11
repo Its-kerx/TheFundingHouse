@@ -61,6 +61,27 @@ services:
       - "8002:8002"
 
   # ------------------------
+  # Scheduler de funding (refrescos periodicos)
+  # ------------------------
+  funding_scheduler:
+    build:
+      context: ./microservices/funding-scheduler-service
+      dockerfile: Dockerfile
+    container_name: tfh-funding-scheduler
+    command: ["python", "-m", "funding_scheduler"]
+    restart: unless-stopped
+    environment:
+      BACKPACK_BASE_URL: http://data_ingestion:8001
+      HYPERLIQUID_BASE_URL: http://data_ingestion:8001
+      FUNDING_ANALYTICS_BASE_URL: http://funding_analytics:8002
+      MARKETS_REFRESH_SECONDS: 60
+      SNAPSHOT_REFRESH_SECONDS: 3600
+    depends_on:
+      - mongo
+      - data_ingestion
+      - funding_analytics
+
+  # ------------------------
   # API Gateway
   # ------------------------
   api_gateway:
