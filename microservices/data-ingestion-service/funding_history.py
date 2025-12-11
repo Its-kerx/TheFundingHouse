@@ -167,11 +167,15 @@ def aggregate_to_8h(
     snapshots: List[Dict[str, Any]] = []
     for bucket_start, agg in buckets.items():
         count = agg["count"] or 1
+        avg_rate = agg["sum"] / float(count)
+        funding_percent = avg_rate * 100.0
+        funding_interval_hours = 1.0
         snapshots.append(
             {
                 "timestamp": agg["timestamp"],
-                "funding_rate": agg["sum"] / float(count),
-                "funding_interval_hours": BASE_INTERVAL_HOURS,
+                "funding_rate": avg_rate,
+                "funding_percent": funding_percent,
+                "funding_interval_hours": funding_interval_hours,
             }
         )
 

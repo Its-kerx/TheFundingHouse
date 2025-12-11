@@ -43,7 +43,7 @@ funding_ts_col = None
 hyper_adapter = HyperliquidAdapter()
 backpack_adapter = BackpackAdapter()
 
-FUNDING_INTERVAL_HOURS_DEFAULT = BASE_INTERVAL_HOURS
+FUNDING_INTERVAL_HOURS_DEFAULT = 1.0
 
 
 # -------------------------
@@ -89,6 +89,14 @@ async def insert_funding_timeseries(snapshot: Dict[str, Any]) -> None:
         raise RuntimeError("Mongo funding_ts_col not initialized")
 
     funding_rate = float(snapshot.get("funding_rate") or 0.0)
+    interval_hours = float(
+        snapshot.get("funding_interval_hours") or FUNDING_INTERVAL_HOURS_DEFAULT
+    )
+    if interval_hours <= 0:
+        interval_hours = FUNDING_INTERVAL_HOURS_DEFAULT
+    funding_percent = funding_rate * 100.0
+    periods_per_year = (365.0 * 24.0) / interval_hours
+    apr_percent = funding_rate * periods_per_year * 100.0
     timestamp = snapshot.get("timestamp") or now_utc()
 
     doc = {
@@ -96,9 +104,9 @@ async def insert_funding_timeseries(snapshot: Dict[str, Any]) -> None:
         "symbol": snapshot.get("symbol"),
         "canonical_symbol": snapshot.get("canonical_symbol"),
         "funding_rate": funding_rate,
-        "funding_interval_hours": float(
-            snapshot.get("funding_interval_hours") or FUNDING_INTERVAL_HOURS_DEFAULT
-        ),
+        "funding_percent": funding_percent,
+        "funding_interval_hours": interval_hours,
+        "apr_percent": apr_percent,
         "timestamp": timestamp,
         "mark_price": snapshot.get("mark_price"),
         "index_price": snapshot.get("index_price") or snapshot.get("oracle_price"),
@@ -131,6 +139,16 @@ async def upsert_current_and_ts(col, snapshot: Dict[str, Any]) -> None:
         ),
         "timestamp": snapshot.get("timestamp") or now_utc(),
     }
+    if normalized["funding_interval_hours"] <= 0:
+        normalized["funding_interval_hours"] = FUNDING_INTERVAL_HOURS_DEFAULT
+    # Derivados estandarizados
+    funding_rate = normalized["funding_rate"]
+    interval_hours = normalized["funding_interval_hours"]
+    funding_percent = funding_rate * 100.0
+    periods_per_year = (365.0 * 24.0) / interval_hours
+    apr_percent = funding_rate * periods_per_year * 100.0
+    normalized["funding_percent"] = funding_percent
+    normalized["apr_percent"] = apr_percent
 
     key = {
         "exchange": normalized["exchange"],
@@ -211,16 +229,25 @@ async def _bootstrap_funding_history_internal(days: int = 30) -> Dict[str, Any]:
             canonical = canonical_symbol_from_snapshot({"symbol": symbol})
 
             for snap in snapshots:
+                funding_rate = float(snap.get("funding_rate") or 0.0)
+                interval_hours = float(
+                    snap.get("funding_interval_hours") or FUNDING_INTERVAL_HOURS_DEFAULT
+                )
+                if interval_hours <= 0:
+                    interval_hours = FUNDING_INTERVAL_HOURS_DEFAULT
+                funding_percent = funding_rate * 100.0
+                periods_per_year = (365.0 * 24.0) / interval_hours
+                apr_percent = funding_rate * periods_per_year * 100.0
+
                 docs.append(
                     {
                         "exchange": exchange_name,
                         "symbol": symbol,
                         "canonical_symbol": canonical,
-                        "funding_rate": float(snap.get("funding_rate") or 0.0),
-                        "funding_interval_hours": float(
-                            snap.get("funding_interval_hours")
-                            or FUNDING_INTERVAL_HOURS_DEFAULT
-                        ),
+                        "funding_rate": funding_rate,
+                        "funding_percent": funding_percent,
+                        "funding_interval_hours": interval_hours,
+                        "apr_percent": apr_percent,
                         "mark_price": snap.get("mark_price"),
                         "open_interest": snap.get("open_interest"),
                         "volume_24h": snap.get("volume_24h"),
