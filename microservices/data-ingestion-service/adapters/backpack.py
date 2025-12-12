@@ -36,6 +36,23 @@ class BackpackAdapter(ExchangeAdapter):
         resp.raise_for_status()
         return resp.json()
 
+    async def _get_ticker_volumes(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Devuelve un mapa symbol -> raw ticker con volumen USD 24h si existe.
+        """
+        try:
+            data = await self._get("/tickers")
+        except Exception:
+            return {}
+
+        tickers: Dict[str, Dict[str, Any]] = {}
+        for item in data or []:
+            sym = item.get("symbol")
+            if not sym:
+                continue
+            tickers[sym] = item
+        return tickers
+
     # ------------------- Métodos abstractos -------------------
 
     async def get_markets(self) -> List[Dict[str, Any]]:
@@ -145,6 +162,7 @@ class BackpackAdapter(ExchangeAdapter):
         """
         mark_list = await self._get("/markPrices")
         oi_list = await self._get("/openInterest")
+        ticker_map = await self._get_ticker_volumes()
 
         oi_map = {item.get("symbol"): item for item in (oi_list or [])}
 
@@ -166,6 +184,14 @@ class BackpackAdapter(ExchangeAdapter):
                 else None
             )
 
+            ticker_raw = ticker_map.get(raw_symbol, {})
+            volume_24h = self._to_float(
+                ticker_raw.get("usdVolume24h")
+                or ticker_raw.get("quoteVolume24h")
+                or ticker_raw.get("volumeUsd24h")
+                or ticker_raw.get("volume24h")
+            )
+
             results.append(
                 {
                     "exchange": self.exchange_name,
@@ -176,12 +202,15 @@ class BackpackAdapter(ExchangeAdapter):
                     "open_interest": self._to_float(oi.get("openInterest"))
                     if oi
                     else None,
-                    "volume_24h": None,
+                    "volume_24h": volume_24h if volume_24h > 0 else None,
                     "mark_price": self._to_float(mp.get("markPrice")),
                     "index_price": self._to_float(mp.get("indexPrice")),
-                    "raw": {"markPrices": mp, "openInterest": oi},
+                    "raw": {"markPrices": mp, "openInterest": oi, "ticker": ticker_raw},
                 }
             )
+
+        populated = sum(1 for r in results if r.get("volume_24h") is not None)
+        print(f"[backpack] volume_24h populated for {populated}/{len(results)} markets", flush=True)
 
         return results
 

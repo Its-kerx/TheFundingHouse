@@ -84,21 +84,21 @@
                 </div>
                 
                 <!-- NUEVAS TEMPORALIDADES Y BUSCADOR -->
-                <div class="flex flex-col md:flex-row gap-3 w-full xl:w-auto items-center">
-                    <div id="time-filters" class="flex flex-wrap gap-2 bg-[#1e1e30]/50 p-1 rounded-lg">
-                        <button class="time-btn" data-val="live">Live</button>
+                <div class="flex flex-col md:flex-row gap-3 w-full items-center">
+                    <div class="relative w-full md:max-w-xl mx-auto flex-1">
+                        <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500"></i>
+                        <input data-funding-search type="text" placeholder="Search token..." class="w-full bg-[#1e1e30] border border-white/10 rounded-lg py-2 pl-9 pr-4 text-sm text-white focus:outline-none focus:border-brandTeal/50">
+                    </div>
+
+                    <div id="time-filters" class="flex flex-wrap gap-2 bg-[#1e1e30]/50 p-1 rounded-lg ml-auto">
+                        <button class="time-btn active" data-val="live">Live</button>
                         <button class="time-btn" data-val="1h">1h</button>
                         <button class="time-btn" data-val="8h">8h</button>
-                        <button class="time-btn active" data-val="24h">24h</button>
+                        <button class="time-btn" data-val="24h">24h</button>
                         <button class="time-btn" data-val="3d">3d</button>
                         <button class="time-btn" data-val="7d">7d</button>
                         <button class="time-btn" data-val="15d">15d</button>
                         <button class="time-btn" data-val="31d">31d</button>
-                    </div>
-                    
-                    <div class="relative w-full md:w-64">
-                        <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500"></i>
-                        <input type="text" placeholder="Search token..." class="w-full bg-[#1e1e30] border border-white/10 rounded-lg py-2 pl-9 pr-4 text-sm text-white focus:outline-none focus:border-brandTeal/50">
                     </div>
                 </div>
             </div>
@@ -118,7 +118,7 @@
                         <th class="px-4 py-3 font-medium bg-bgDark text-right">Action</th>
                     </tr>
                 </thead>
-                <tbody id="funding-table-body">
+                <tbody id="funding-table-body" data-funding-table-body>
                     <tr><td colspan="8" class="text-center py-20 text-slate-500">Loading...</td></tr>
                 </tbody>
             </table>

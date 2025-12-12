@@ -32,6 +32,10 @@ function renderSidebar() {
 }
 
 // --- 2. Lógica de Interfaz (Dropdown y Temporalidades) ---
+let currentTimeframe = "live";
+let allRows = [];
+let filteredRows = [];
+
 function initUIInteractions() {
     // A. Dropdown de Plataformas
     const btn = document.getElementById('platforms-btn');
@@ -59,12 +63,46 @@ function initUIInteractions() {
             timeButtons.forEach(b => b.classList.remove('active'));
             // Añadir al clickeado
             button.classList.add('active');
-            
-            // Aquí podrías llamar a tu backend con la nueva temporalidad
-            console.log("Timeframe changed to:", button.dataset.val);
-            // initDashboard(button.dataset.val); // Ejemplo de recarga
+
+            const tf = button.dataset.val || "live";
+            currentTimeframe = tf;
+            const tableBody = document.querySelector("[data-funding-table-body]") || document.getElementById("funding-table-body");
+            if (tableBody) {
+                tableBody.innerHTML = '';
+            }
+
+            if (tf === "live") {
+                loadFundingLive();
+            } else {
+                if (tableBody) {
+                    tableBody.innerHTML = '<tr><td colspan="8" class="text-center py-10 text-slate-400">Not implemented yet</td></tr>';
+                }
+            }
         });
     });
+
+    // Search filter
+    const searchInput = document.querySelector("[data-funding-search]");
+    if (searchInput) {
+        searchInput.addEventListener("input", (e) => {
+            const term = (e.target.value || "").toLowerCase().trim();
+            if (!term) {
+                filteredRows = [...allRows];
+            } else {
+                filteredRows = allRows.filter((pair) => {
+                    const sym = (pair.canonical_symbol || "").toLowerCase();
+                    const longSym = ((pair.long_market || {}).symbol || "").toLowerCase();
+                    const shortSym = ((pair.short_market || {}).symbol || "").toLowerCase();
+                    return (
+                        sym.includes(term) ||
+                        longSym.includes(term) ||
+                        shortSym.includes(term)
+                    );
+                });
+            }
+            renderFundingRows(filteredRows);
+        });
+    }
 }
 
 // --- 3. Datos y Tablas ---
@@ -72,43 +110,16 @@ function initDashboard() {
     loadFundingLive();
 }
 
-function renderTableRows(data, container) {
-    if (!data || data.length === 0) {
-        container.innerHTML = '<tr><td colspan="8" class="text-center py-10 text-slate-400">No data available</td></tr>';
-        return;
-    }
-
-    container.innerHTML = data.map((item, i) => `
-        <tr class="hover:bg-white/5 transition-colors group">
-            <td class="px-4 py-3 text-slate-400 border-b border-white/5 first:rounded-l-lg">${i + 1}</td>
-            <td class="px-4 py-3 font-bold text-white border-b border-white/5 flex items-center gap-2">
-                <div class="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center text-[10px]">${item.token[0]}</div>
-                ${item.token}
-            </td>
-            <td class="px-4 py-3 text-brandTeal font-mono border-b border-white/5">${item.apr}%</td>
-            <td class="px-4 py-3 text-slate-300 border-b border-white/5 text-xs">
-                ${item.long_platform.substring(0,2).toUpperCase()} / ${item.short_platform.substring(0,2).toUpperCase()}
-            </td>
-            <td class="px-4 py-3 text-slate-400 border-b border-white/5 font-mono hidden md:table-cell">${item.spread}%</td>
-            <td class="px-4 py-3 text-slate-400 border-b border-white/5 font-mono text-xs hidden md:table-cell">
-                <div class="text-green-400/70">L: ${item.oi_long}</div>
-                <div class="text-red-400/70">S: ${item.oi_short}</div>
-            </td>
-            <td class="px-4 py-3 text-slate-500 border-b border-white/5 font-mono hidden md:table-cell">${item.volume}</td>
-            <td class="px-4 py-3 text-right border-b border-white/5 last:rounded-r-lg">
-                <button class="text-brandTeal hover:bg-brandTeal/10 p-2 rounded transition-colors"><i data-lucide="external-link" class="w-4 h-4"></i></button>
-            </td>
-        </tr>
-    `).join('');
-    
-    if(window.lucide) lucide.createIcons();
-}
-
 async function loadFundingLive() {
     const tableBody = document.querySelector("[data-funding-table-body]") || document.getElementById("funding-table-body");
     if (!tableBody) return;
 
     tableBody.innerHTML = "";
+
+    if (currentTimeframe !== "live") {
+        tableBody.innerHTML = '<tr><td colspan="8" class="text-center py-10 text-slate-400">Not implemented yet</td></tr>';
+        return;
+    }
 
     try {
         const params = new URLSearchParams({
@@ -125,61 +136,127 @@ async function loadFundingLive() {
 
         data.sort((a, b) => (b.spread_apr_percent || 0) - (a.spread_apr_percent || 0));
 
-        if (!data.length) {
-            tableBody.innerHTML = '<tr><td colspan="8" class="text-center py-10 text-slate-400">No data available</td></tr>';
-            return;
-        }
-
-        const fmtPercent = (v) => (v == null ? "-" : `${v.toFixed(1)}%`);
-        const fmtNum = (v) => {
-            if (v == null) return "-";
-            if (v >= 1_000_000_000) return (v / 1_000_000_000).toFixed(1) + "B";
-            if (v >= 1_000_000) return (v / 1_000_000).toFixed(1) + "M";
-            if (v >= 1_000) return (v / 1_000).toFixed(1) + "K";
-            return v.toString();
-        };
-
-        data.forEach((pair, i) => {
-            const long = pair.long_market || {};
-            const short = pair.short_market || {};
-
-            const longExchange = long.exchange || "L";
-            const shortExchange = short.exchange || "S";
-
-            const longOi = fmtNum(long.open_interest);
-            const shortOi = fmtNum(short.open_interest);
-            const vol24h = fmtNum(
-                long.volume_24h != null ? long.volume_24h : short.volume_24h
-            );
-
-            const tr = document.createElement("tr");
-            tr.className = "hover:bg-white/5 transition-colors group";
-            tr.innerHTML = `
-                <td class="px-4 py-3 text-slate-400 border-b border-white/5 first:rounded-l-lg">${i + 1}</td>
-                <td class="px-4 py-3 font-bold text-white border-b border-white/5 flex items-center gap-2">
-                    <div class="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center text-[10px]">${(pair.canonical_symbol || "?")[0]}</div>
-                    ${pair.canonical_symbol || pair.pair_id || "-"}
-                </td>
-                <td class="px-4 py-3 text-brandTeal font-mono border-b border-white/5">${fmtPercent(pair.spread_apr_percent)}</td>
-                <td class="px-4 py-3 text-slate-300 border-b border-white/5 text-xs">
-                    ${longExchange.substring(0,2).toUpperCase()} / ${shortExchange.substring(0,2).toUpperCase()}
-                </td>
-                <td class="px-4 py-3 text-slate-400 border-b border-white/5 font-mono hidden md:table-cell">${fmtPercent(pair.spread_apr_percent)}</td>
-                <td class="px-4 py-3 text-slate-400 border-b border-white/5 font-mono text-xs hidden md:table-cell">
-                    <div class="text-green-400/70">L: ${longOi}</div>
-                    <div class="text-red-400/70">S: ${shortOi}</div>
-                </td>
-                <td class="px-4 py-3 text-slate-500 border-b border-white/5 font-mono hidden md:table-cell">${vol24h}</td>
-                <td class="px-4 py-3 text-right border-b border-white/5 last:rounded-r-lg">
-                    <button class="text-brandTeal hover:bg-brandTeal/10 p-2 rounded transition-colors"><i data-lucide="external-link" class="w-4 h-4"></i></button>
-                </td>
-            `;
-            tableBody.appendChild(tr);
-        });
-
-        if (window.lucide) window.lucide.createIcons();
+        allRows = data;
+        filteredRows = [...data];
+        renderFundingRows(filteredRows);
     } catch (err) {
         console.error("Error loading funding live:", err);
         tableBody.innerHTML = '<tr><td colspan="8" class="text-center py-4 text-red-400">Error loading data</td></tr>';
     }
+}
+
+function renderFundingRows(data) {
+    const tableBody = document.querySelector("[data-funding-table-body]") || document.getElementById("funding-table-body");
+    if (!tableBody) return;
+
+    if (!data || data.length === 0) {
+        tableBody.innerHTML = '<tr><td colspan="8" class="text-center py-10 text-slate-400">No data available</td></tr>';
+        return;
+    }
+
+    const fmtPercent = (v) => (v == null ? "-" : `${Number(v).toFixed(1)}%`);
+    const fmtNum = (v) => {
+        const num = Number(v);
+        if (!isFinite(num)) return "-";
+        if (num >= 1_000_000_000) return (num / 1_000_000_000).toFixed(1) + "B";
+        if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + "M";
+        if (num >= 1_000) return (num / 1_000).toFixed(1) + "K";
+        return num.toString();
+    };
+
+    tableBody.innerHTML = "";
+
+    const rows = data.map((pair) => {
+        const volL = Number(pair.long_market?.volume_24h);
+        const volS = Number(pair.short_market?.volume_24h);
+        const volTotal = (Number.isFinite(volL) ? volL : 0) + (Number.isFinite(volS) ? volS : 0);
+        return {
+            ...pair,
+            __volL: volL,
+            __volS: volS,
+            __volTotal: volTotal,
+        };
+    });
+
+    const maxVolTotal = Math.max(1, ...rows.map((r) => Number.isFinite(r.__volTotal) ? r.__volTotal : 0));
+
+    rows.forEach((pair, i) => {
+        const long = pair.long_market || {};
+        const short = pair.short_market || {};
+
+        const longExchange = (long.exchange || "L").toString();
+        const shortExchange = (short.exchange || "S").toString();
+
+        const computeOiUsd = (mkt) => {
+            const oi = Number(mkt.open_interest);
+            const price = Number(mkt.mark_price);
+            const ex = (mkt.exchange || "").toString().toLowerCase();
+            if (!isFinite(oi) || oi <= 0) return null;
+            if (ex === "hyperliquid") {
+                if (!isFinite(price) || price <= 0) return null;
+                return oi * price;
+            }
+            return oi;
+        };
+
+        const longOiVal = computeOiUsd(long);
+        const shortOiVal = computeOiUsd(short);
+        const longOi = longOiVal != null ? fmtNum(longOiVal) : "—";
+        const shortOi = shortOiVal != null ? fmtNum(shortOiVal) : "—";
+        const totalOiVal = (longOiVal || 0) + (shortOiVal || 0);
+        const totalOi = (longOiVal == null && shortOiVal == null) ? "—" : fmtNum(totalOiVal);
+
+        const priceA = Number(long.mark_price);
+        const priceB = Number(short.mark_price);
+        let priceSpreadPctText = "—";
+        if (Number.isFinite(priceA) && Number.isFinite(priceB) && priceA > 0 && priceB > 0) {
+            const mid = (priceA + priceB) / 2;
+            if (mid > 0) {
+                const priceSpreadPct = ((priceB - priceA) / mid) * 100;
+                priceSpreadPctText = `${priceSpreadPct.toFixed(2)}%`;
+            }
+        }
+
+        const volLDisplay = Number.isFinite(pair.__volL) ? pair.__volL : null;
+        const volSDisplay = Number.isFinite(pair.__volS) ? pair.__volS : null;
+        const volLText = volLDisplay != null && volLDisplay > 0 ? fmtNum(volLDisplay) : "—";
+        const volSText = volSDisplay != null && volSDisplay > 0 ? fmtNum(volSDisplay) : "—";
+        const volTotal = (volLDisplay ?? 0) + (volSDisplay ?? 0);
+        const totalVolText = (volLDisplay == null && volSDisplay == null) ? "—" : fmtNum(volTotal);
+
+        const tr = document.createElement("tr");
+        tr.className = "hover:bg-white/5 transition-colors group";
+        tr.innerHTML = `
+            <td class="px-4 py-3 text-slate-400 border-b border-white/5 first:rounded-l-lg">${i + 1}</td>
+            <td class="px-4 py-3 font-bold text-white border-b border-white/5 flex items-center gap-2">
+                <div class="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center text-[10px]">${(pair.canonical_symbol || "?")[0]}</div>
+                ${pair.canonical_symbol || pair.pair_id || "-"}
+            </td>
+            <td class="px-4 py-3 text-brandTeal font-mono border-b border-white/5">${fmtPercent(pair.spread_apr_percent)}</td>
+            <td class="px-4 py-3 text-slate-300 border-b border-white/5 text-xs">
+                ${longExchange.substring(0,2).toUpperCase()} / ${shortExchange.substring(0,2).toUpperCase()}
+            </td>
+            <td class="px-4 py-3 text-slate-400 border-b border-white/5 font-mono hidden md:table-cell">${priceSpreadPctText}</td>
+            <td class="px-4 py-3 text-slate-400 border-b border-white/5 font-mono text-xs hidden md:table-cell">
+                <div class="text-green-400/70">L: ${longOi}</div>
+                <div class="text-red-400/70">S: ${shortOi}</div>
+                <div class="text-slate-400/70 text-[12px]">T: ${totalOi}</div>
+            </td>
+            <td class="px-4 py-3 text-slate-500 border-b border-white/5 font-mono text-xs hidden md:table-cell">
+                <div class="flex items-center justify-between gap-2">
+                    <div>
+                        <div class="text-green-400/70">L: ${volLText}</div>
+                        <div class="text-red-400/70">S: ${volSText}</div>
+                        <div class="text-slate-400/70 text-[12px]">T: ${totalVolText}</div>
+                    </div>
+                </div>
+            </td>
+            <td class="px-4 py-3 text-right border-b border-white/5 last:rounded-r-lg">
+                <button class="text-brandTeal hover:bg-brandTeal/10 p-2 rounded transition-colors"><i data-lucide="external-link" class="w-4 h-4"></i></button>
+            </td>
+        `;
+        tableBody.appendChild(tr);
+    });
+
+    if (window.lucide) window.lucide.createIcons();
 }
