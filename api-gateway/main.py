@@ -1,18 +1,24 @@
 """
-TheFundingHouse API Gateway (versión simplificada)
-- /health        -> estado del gateway
-- /api/v1/data-ingestion/*  -> proxy a microservicio data-ingestion
+TheFundingHouse API Gateway (simplified)
+- /health                        -> gateway status
+- /api/v1/data-ingestion/*       -> proxy to data-ingestion microservice
+- /api/funding/live              -> proxy to funding-analytics live endpoint
 """
 
 import logging
+import os
 
 import httpx
-from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 GATEWAY_PORT = 3000
-DATA_INGESTION_URL = "http://localhost:8001"
+DATA_INGESTION_URL = os.getenv("DATA_INGESTION_URL", "http://localhost:8001")
+FUNDING_ANALYTICS_BASE_URL = os.getenv(
+    "FUNDING_ANALYTICS_BASE_URL",
+    "http://funding_analytics:8002",
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,11 +28,11 @@ logger = logging.getLogger("tfh-gateway")
 
 app = FastAPI(
     title="TheFundingHouse API Gateway (simple)",
-    description="Gateway mínimo para enrutar a data-ingestion",
+    description="Gateway minimo para enrutar a servicios internos",
     version="0.1.0",
 )
 
-# CORS muy abierto para desarrollo
+# CORS abierto para desarrollo
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,7 +44,7 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    """Health básico del gateway"""
+    """Health basico del gateway"""
     return {"status": "ok", "service": "gateway"}
 
 
@@ -47,7 +53,7 @@ async def health():
 async def log_requests(request: Request, call_next):
     logger.info(f"{request.method} {request.url.path}")
     response = await call_next(request)
-    logger.info(f"← {request.method} {request.url.path} - {response.status_code}")
+    logger.info(f"[DONE] {request.method} {request.url.path} - {response.status_code}")
     return response
 
 
@@ -64,7 +70,7 @@ async def proxy_data_ingestion(request: Request, path: str) -> Response:
     if request.url.query:
         target_url += f"?{request.url.query}"
 
-    logger.info(f"[PROXY] → {request.method} {target_url}")
+    logger.info(f"[PROXY] -> {request.method} {target_url}")
 
     try:
         body = await request.body()
@@ -89,6 +95,42 @@ async def proxy_data_ingestion(request: Request, path: str) -> Response:
         },
         media_type=resp.headers.get("content-type"),
     )
+
+
+@app.get("/api/funding/live")
+async def proxy_funding_live(
+    min_spread_apr_percent: float = 0.0,
+    limit: int = 100,
+):
+    """
+    Proxy to the funding-analytics /funding/live endpoint.
+    """
+    upstream_url = FUNDING_ANALYTICS_BASE_URL.rstrip("/") + "/funding/live"
+    params = {
+        "min_spread_apr_percent": min_spread_apr_percent,
+        "limit": limit,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(upstream_url, params=params)
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Error calling funding-analytics: {exc}",
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Funding live service returned error",
+                "status": resp.status_code,
+                "body": resp.text,
+            },
+        )
+
+    data = resp.json()
+    return JSONResponse(content=data)
 
 
 @app.exception_handler(Exception)

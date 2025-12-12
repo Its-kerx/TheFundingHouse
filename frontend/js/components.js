@@ -69,27 +69,7 @@ function initUIInteractions() {
 
 // --- 3. Datos y Tablas ---
 function initDashboard() {
-    const tableBody = document.getElementById('funding-table-body');
-    // Datos de ejemplo para que veas que funciona
-    const mockData = [
-        { token: "BTC", apr: 25.5, long_platform: "Hyperliquid", short_platform: "Paradex", spread: 0.04, oi_long: "4M", oi_short: "3.2M", volume: "120M" },
-        { token: "ETH", apr: 19.2, long_platform: "Backpack", short_platform: "Aster", spread: 0.01, oi_long: "12M", oi_short: "10M", volume: "350M" },
-        { token: "SOL", apr: 15.8, long_platform: "Paradex", short_platform: "Hyperliquid", spread: 0.08, oi_long: "800K", oi_short: "900K", volume: "45M" },
-        { token: "SUI", apr: 12.1, long_platform: "Aster", short_platform: "Backpack", spread: 0.05, oi_long: "1.2M", oi_short: "1.1M", volume: "22M" }
-    ];
-    
-    // Si tienes backend real, descomenta el fetch y comenta renderTableRows(mockData...)
-    /*
-    fetch('/api/v1/opportunities')
-        .then(res => res.json())
-        .then(data => renderTableRows(data, tableBody))
-        .catch(err => {
-            console.error(err);
-            tableBody.innerHTML = '<tr><td colspan="8" class="text-center py-4 text-red-400">Error loading data</td></tr>';
-        });
-    */
-   
-    renderTableRows(mockData, tableBody);
+    loadFundingLive();
 }
 
 function renderTableRows(data, container) {
@@ -122,4 +102,84 @@ function renderTableRows(data, container) {
     `).join('');
     
     if(window.lucide) lucide.createIcons();
+}
+
+async function loadFundingLive() {
+    const tableBody = document.querySelector("[data-funding-table-body]") || document.getElementById("funding-table-body");
+    if (!tableBody) return;
+
+    tableBody.innerHTML = "";
+
+    try {
+        const params = new URLSearchParams({
+            min_spread_apr_percent: "0",
+            limit: "100",
+        });
+        const res = await fetch(`/api/funding/live?${params.toString()}`);
+        if (!res.ok) {
+            console.error("Failed to fetch /api/funding/live", res.status);
+            tableBody.innerHTML = '<tr><td colspan="8" class="text-center py-4 text-red-400">Error loading data</td></tr>';
+            return;
+        }
+        const data = await res.json();
+
+        data.sort((a, b) => (b.spread_apr_percent || 0) - (a.spread_apr_percent || 0));
+
+        if (!data.length) {
+            tableBody.innerHTML = '<tr><td colspan="8" class="text-center py-10 text-slate-400">No data available</td></tr>';
+            return;
+        }
+
+        const fmtPercent = (v) => (v == null ? "-" : `${v.toFixed(1)}%`);
+        const fmtNum = (v) => {
+            if (v == null) return "-";
+            if (v >= 1_000_000_000) return (v / 1_000_000_000).toFixed(1) + "B";
+            if (v >= 1_000_000) return (v / 1_000_000).toFixed(1) + "M";
+            if (v >= 1_000) return (v / 1_000).toFixed(1) + "K";
+            return v.toString();
+        };
+
+        data.forEach((pair, i) => {
+            const long = pair.long_market || {};
+            const short = pair.short_market || {};
+
+            const longExchange = long.exchange || "L";
+            const shortExchange = short.exchange || "S";
+
+            const longOi = fmtNum(long.open_interest);
+            const shortOi = fmtNum(short.open_interest);
+            const vol24h = fmtNum(
+                long.volume_24h != null ? long.volume_24h : short.volume_24h
+            );
+
+            const tr = document.createElement("tr");
+            tr.className = "hover:bg-white/5 transition-colors group";
+            tr.innerHTML = `
+                <td class="px-4 py-3 text-slate-400 border-b border-white/5 first:rounded-l-lg">${i + 1}</td>
+                <td class="px-4 py-3 font-bold text-white border-b border-white/5 flex items-center gap-2">
+                    <div class="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center text-[10px]">${(pair.canonical_symbol || "?")[0]}</div>
+                    ${pair.canonical_symbol || pair.pair_id || "-"}
+                </td>
+                <td class="px-4 py-3 text-brandTeal font-mono border-b border-white/5">${fmtPercent(pair.spread_apr_percent)}</td>
+                <td class="px-4 py-3 text-slate-300 border-b border-white/5 text-xs">
+                    ${longExchange.substring(0,2).toUpperCase()} / ${shortExchange.substring(0,2).toUpperCase()}
+                </td>
+                <td class="px-4 py-3 text-slate-400 border-b border-white/5 font-mono hidden md:table-cell">${fmtPercent(pair.spread_apr_percent)}</td>
+                <td class="px-4 py-3 text-slate-400 border-b border-white/5 font-mono text-xs hidden md:table-cell">
+                    <div class="text-green-400/70">L: ${longOi}</div>
+                    <div class="text-red-400/70">S: ${shortOi}</div>
+                </td>
+                <td class="px-4 py-3 text-slate-500 border-b border-white/5 font-mono hidden md:table-cell">${vol24h}</td>
+                <td class="px-4 py-3 text-right border-b border-white/5 last:rounded-r-lg">
+                    <button class="text-brandTeal hover:bg-brandTeal/10 p-2 rounded transition-colors"><i data-lucide="external-link" class="w-4 h-4"></i></button>
+                </td>
+            `;
+            tableBody.appendChild(tr);
+        });
+
+        if (window.lucide) window.lucide.createIcons();
+    } catch (err) {
+        console.error("Error loading funding live:", err);
+        tableBody.innerHTML = '<tr><td colspan="8" class="text-center py-4 text-red-400">Error loading data</td></tr>';
+    }
 }

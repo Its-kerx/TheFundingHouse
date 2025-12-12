@@ -91,6 +91,7 @@ services:
     environment:
       DATA_INGESTION_URL: http://data_ingestion:8001
       FUNDING_ANALYTICS_URL: http://funding_analytics:8002
+      FUNDING_ANALYTICS_BASE_URL: http://funding_analytics:8002
       PORT: 3000
     depends_on:
       - data_ingestion
@@ -107,6 +108,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./frontend:/usr/share/nginx/html:ro
+      - ./frontend/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "8080:80"
     depends_on:
