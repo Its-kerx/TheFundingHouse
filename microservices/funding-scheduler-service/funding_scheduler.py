@@ -9,7 +9,8 @@ def _env(name: str, default: str) -> str:
     return os.getenv(name, default)
 
 
-BACKPACK_BASE_URL = _env("BACKPACK_BASE_URL", "http://localhost:8001")
+BACKPACK_DEFAULT = "http://data_ingestion:8001"
+BACKPACK_BASE_URL = _env("BACKPACK_BASE_URL", BACKPACK_DEFAULT)
 HYPERLIQUID_BASE_URL = _env("HYPERLIQUID_BASE_URL", "http://localhost:8001")
 FUNDING_ANALYTICS_BASE_URL = _env("FUNDING_ANALYTICS_BASE_URL", "http://localhost:8002")
 
@@ -38,8 +39,9 @@ def _run_loop() -> None:
         now = time.monotonic()
 
         if now >= next_markets:
-            log("Refreshing markets (Backpack + Hyperliquid)")
-            _safe_post(f"{BACKPACK_BASE_URL}/backpack/refresh")
+            bp_url = f"{BACKPACK_BASE_URL}/backpack/refresh"
+            log(f"Refreshing markets (Backpack + Hyperliquid) | backpack_url={bp_url}")
+            _safe_post(bp_url)
             _safe_post(f"{HYPERLIQUID_BASE_URL}/hyperliquid/refresh")
             next_markets = now + MARKETS_REFRESH_SECONDS
 

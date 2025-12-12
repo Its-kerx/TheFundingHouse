@@ -8,6 +8,7 @@ Adapter sencillo que obtiene datos crudos de Backpack:
 NO calcula APR ni hace derivadas: eso se hará en otros microservicios.
 """
 
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -15,7 +16,7 @@ import httpx
 
 from .base import ExchangeAdapter
 
-BACKPACK_BASE_URL = "https://api.backpack.exchange/api/v1"
+BACKPACK_BASE_URL = os.getenv("BACKPACK_BASE_URL", "https://api.backpack.exchange/api/v1")
 
 
 class BackpackAdapter(ExchangeAdapter):
@@ -32,9 +33,24 @@ class BackpackAdapter(ExchangeAdapter):
         self, path: str, params: Optional[Dict[str, Any]] = None
     ) -> Any:
         """Wrapper simple sobre GET con httpx."""
-        resp = await self._client.get(path, params=params)
-        resp.raise_for_status()
-        return resp.json()
+        url = path
+        try:
+            resp = await self._client.get(url, params=params)
+            status = resp.status_code
+            print(f"[backpack] GET {url} -> {status}", flush=True)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response else None
+            body = ""
+            if exc.response is not None:
+                try:
+                    body = exc.response.text[:200]
+                except Exception:
+                    body = ""
+            raise RuntimeError(f"Backpack GET {url} failed with status={status}, body={body}")
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"Backpack GET {url} request error: {exc}")
 
     async def _get_ticker_volumes(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -160,11 +176,28 @@ class BackpackAdapter(ExchangeAdapter):
 
         Devuelve una lista de dicts listos para guardar tal cual en Mongo.
         """
-        mark_list = await self._get("/markPrices")
-        oi_list = await self._get("/openInterest")
+        print(f"[backpack] using BACKPACK_BASE_URL={BACKPACK_BASE_URL}", flush=True)
+
+        try:
+            mark_list = await self._get("/markPrices")
+        except Exception as e:
+            print(f"[backpack] error fetching markPrices: {e}", flush=True)
+            mark_list = []
+
+        try:
+            oi_list = await self._get("/openInterest")
+        except Exception as e:
+            print(f"[backpack] error fetching openInterest: {e}", flush=True)
+            oi_list = []
+
         ticker_map = await self._get_ticker_volumes()
+        if ticker_map:
+            sample_tickers = list(ticker_map.keys())[:5]
+            print(f"[backpack] ticker symbols sample: {sample_tickers}", flush=True)
 
         oi_map = {item.get("symbol"): item for item in (oi_list or [])}
+        if oi_map:
+            print(f"[backpack] openInterest symbols sample: {list(oi_map.keys())[:5]}", flush=True)
 
         now = datetime.now(timezone.utc)
         results: List[Dict[str, Any]] = []
@@ -185,12 +218,8 @@ class BackpackAdapter(ExchangeAdapter):
             )
 
             ticker_raw = ticker_map.get(raw_symbol, {})
-            volume_24h = self._to_float(
-                ticker_raw.get("usdVolume24h")
-                or ticker_raw.get("quoteVolume24h")
-                or ticker_raw.get("volumeUsd24h")
-                or ticker_raw.get("volume24h")
-            )
+            quote_vol = ticker_raw.get("quoteVolume") or ticker_raw.get("quote_volume")
+            volume_24h = self._to_float(quote_vol) if quote_vol is not None else None
 
             results.append(
                 {
@@ -202,7 +231,7 @@ class BackpackAdapter(ExchangeAdapter):
                     "open_interest": self._to_float(oi.get("openInterest"))
                     if oi
                     else None,
-                    "volume_24h": volume_24h if volume_24h > 0 else None,
+                    "volume_24h": volume_24h if (volume_24h is not None and volume_24h > 0) else None,
                     "mark_price": self._to_float(mp.get("markPrice")),
                     "index_price": self._to_float(mp.get("indexPrice")),
                     "raw": {"markPrices": mp, "openInterest": oi, "ticker": ticker_raw},

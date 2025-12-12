@@ -39,6 +39,7 @@ services:
       MONGO_DB: tfh
       PORT: 8001
       REFRESH_INTERVAL_SECONDS: 300   # 👈 CRON CADA 5 MINUTOS
+      BACKPACK_BASE_URL: https://api.backpack.exchange/api/v1
     depends_on:
       - mongo
     ports:
@@ -71,7 +72,7 @@ services:
     command: ["python", "-m", "funding_scheduler"]
     restart: unless-stopped
     environment:
-      BACKPACK_BASE_URL: http://data_ingestion:8001
+      BACKPACK_BASE_URL: https://api.backpack.exchange/api/v1
       HYPERLIQUID_BASE_URL: http://data_ingestion:8001
       FUNDING_ANALYTICS_BASE_URL: http://funding_analytics:8002
       MARKETS_REFRESH_SECONDS: 60
