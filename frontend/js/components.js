@@ -35,6 +35,7 @@ function renderSidebar() {
 let currentTimeframe = "live";
 let allRows = [];
 let filteredRows = [];
+let logoMap = {};
 
 function initUIInteractions() {
     // A. Dropdown de Plataformas
@@ -101,6 +102,7 @@ function initUIInteractions() {
                 });
             }
             renderFundingRows(filteredRows);
+            loadLogosForRows(filteredRows);
         });
     }
 }
@@ -139,6 +141,7 @@ async function loadFundingLive() {
         allRows = data;
         filteredRows = [...data];
         renderFundingRows(filteredRows);
+        loadLogosForRows(filteredRows);
     } catch (err) {
         console.error("Error loading funding live:", err);
         tableBody.innerHTML = '<tr><td colspan="8" class="text-center py-4 text-red-400">Error loading data</td></tr>';
@@ -224,25 +227,33 @@ function renderFundingRows(data) {
         const volTotal = (volLDisplay ?? 0) + (volSDisplay ?? 0);
         const totalVolText = (volLDisplay == null && volSDisplay == null) ? "—" : fmtNum(volTotal);
 
+        const symbolKey = (pair.canonical_symbol || pair.pair_id || "").toString().toUpperCase();
+        const logoUrl = symbolKey ? logoMap[symbolKey] : undefined;
+        const tokenVisual = logoUrl
+            ? `<img src="${logoUrl}" alt="${pair.canonical_symbol || ""}" class="w-[18px] h-[18px] rounded-full flex-none" style="margin-right:4px;" onerror="this.style.display='none';" />`
+            : `<div class="w-[22px] h-[22px] rounded-full bg-slate-700 flex items-center justify-center text-[10px] flex-none">${(pair.canonical_symbol || "?")[0]}</div>`;
+
         const tr = document.createElement("tr");
-        tr.className = "hover:bg-white/5 transition-colors group";
+        tr.className = "hover:bg-white/5 transition-colors group border-b border-white/5";
         tr.innerHTML = `
-            <td class="px-4 py-3 text-slate-400 border-b border-white/5 first:rounded-l-lg">${i + 1}</td>
-            <td class="px-4 py-3 font-bold text-white border-b border-white/5 flex items-center gap-2">
-                <div class="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center text-[10px]">${(pair.canonical_symbol || "?")[0]}</div>
-                ${pair.canonical_symbol || pair.pair_id || "-"}
+            <td class="px-4 py-3 text-slate-400 first:rounded-l-lg">${i + 1}</td>
+            <td class="px-4 py-3 text-white whitespace-nowrap">
+                <div class="inline-flex items-center gap-2 whitespace-nowrap" style="line-height:1;">
+                    ${tokenVisual}
+                    <span class="font-semibold inline-block">${pair.canonical_symbol || pair.pair_id || "-"}</span>
+                </div>
             </td>
-            <td class="px-4 py-3 text-brandTeal font-mono border-b border-white/5">${fmtPercent(pair.spread_apr_percent)}</td>
-            <td class="px-4 py-3 text-slate-300 border-b border-white/5 text-xs">
+            <td class="px-4 py-3 text-brandTeal font-mono">${fmtPercent(pair.spread_apr_percent)}</td>
+            <td class="px-4 py-3 text-slate-300 text-xs">
                 ${longExchange.substring(0,2).toUpperCase()} / ${shortExchange.substring(0,2).toUpperCase()}
             </td>
-            <td class="px-4 py-3 text-slate-400 border-b border-white/5 font-mono hidden md:table-cell">${priceSpreadPctText}</td>
-            <td class="px-4 py-3 text-slate-400 border-b border-white/5 font-mono text-xs hidden md:table-cell">
+            <td class="px-4 py-3 text-slate-400 font-mono hidden md:table-cell">${priceSpreadPctText}</td>
+            <td class="px-4 py-3 text-slate-400 font-mono text-xs hidden md:table-cell">
                 <div class="text-green-400/70">L: ${longOi}</div>
                 <div class="text-red-400/70">S: ${shortOi}</div>
                 <div class="text-slate-400/70 text-[12px]">T: ${totalOi}</div>
             </td>
-            <td class="px-4 py-3 text-slate-500 border-b border-white/5 font-mono text-xs hidden md:table-cell">
+            <td class="px-4 py-3 text-slate-500 font-mono text-xs hidden md:table-cell">
                 <div class="flex items-center justify-between gap-2">
                     <div>
                         <div class="text-green-400/70">L: ${volLText}</div>
@@ -251,7 +262,7 @@ function renderFundingRows(data) {
                     </div>
                 </div>
             </td>
-            <td class="px-4 py-3 text-right border-b border-white/5 last:rounded-r-lg">
+            <td class="px-4 py-3 text-right last:rounded-r-lg">
                 <button class="text-brandTeal hover:bg-brandTeal/10 p-2 rounded transition-colors"><i data-lucide="external-link" class="w-4 h-4"></i></button>
             </td>
         `;
@@ -259,4 +270,34 @@ function renderFundingRows(data) {
     });
 
     if (window.lucide) window.lucide.createIcons();
+}
+
+async function fetchTokenLogos(symbols) {
+    const uniq = Array.from(new Set(symbols.filter(Boolean)));
+    if (!uniq.length) return {};
+    const qs = encodeURIComponent(uniq.join(","));
+    try {
+        const res = await fetch(`/api/token/logos?symbols=${qs}`);
+        if (!res.ok) return {};
+        return await res.json();
+    } catch (e) {
+        console.error("Error fetching token logos", e);
+        return {};
+    }
+}
+
+async function loadLogosForRows(rows) {
+    const slice = rows.slice(0, 50);
+    const symbols = slice
+        .map((r) => (r.canonical_symbol || r.pair_id || "").toString().toUpperCase())
+        .filter(Boolean);
+    // avoid fetching if already cached
+    const missing = symbols.filter((s) => !logoMap[s]);
+    if (!missing.length) return;
+    const map = await fetchTokenLogos(missing);
+    const hasNew = Object.keys(map || {}).length > 0;
+    logoMap = { ...logoMap, ...map };
+    if (hasNew) {
+        renderFundingRows(filteredRows);
+    }
 }
