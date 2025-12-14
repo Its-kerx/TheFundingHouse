@@ -287,7 +287,7 @@ async function fetchTokenLogos(symbols) {
 }
 
 async function loadLogosForRows(rows) {
-    const slice = rows.slice(0, 50);
+    const slice = rows.slice(0, 100);
     const symbols = slice
         .map((r) => (r.canonical_symbol || r.pair_id || "").toString().toUpperCase())
         .filter(Boolean);
