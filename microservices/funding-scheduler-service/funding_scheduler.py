@@ -9,13 +9,21 @@ def _env(name: str, default: str) -> str:
     return os.getenv(name, default)
 
 
+def _env_float(primary: str, default_val: str, legacy: str | None = None) -> float:
+    val = os.getenv(primary)
+    if val is None and legacy:
+        val = os.getenv(legacy)
+    return float(val or default_val)
+
+
 BACKPACK_DEFAULT = "http://data_ingestion:8001"
 BACKPACK_BASE_URL = _env("BACKPACK_BASE_URL", BACKPACK_DEFAULT)
 HYPERLIQUID_BASE_URL = _env("HYPERLIQUID_BASE_URL", "http://localhost:8001")
 FUNDING_ANALYTICS_BASE_URL = _env("FUNDING_ANALYTICS_BASE_URL", "http://localhost:8002")
 
-MARKETS_REFRESH_SECONDS = float(_env("MARKETS_REFRESH_SECONDS", "60"))
-SNAPSHOT_REFRESH_SECONDS = float(_env("SNAPSHOT_REFRESH_SECONDS", "3600"))
+# New envs with legacy fallback
+MARKETS_EVERY_SECONDS = _env_float("MARKETS_EVERY_SECONDS", "60", legacy="MARKETS_REFRESH_SECONDS")
+SNAPSHOTS_EVERY_SECONDS = _env_float("SNAPSHOTS_EVERY_SECONDS", "60", legacy="SNAPSHOT_REFRESH_SECONDS")
 
 
 def log(msg: str) -> None:
@@ -43,12 +51,12 @@ def _run_loop() -> None:
             log(f"Refreshing markets (Backpack + Hyperliquid) | backpack_url={bp_url}")
             _safe_post(bp_url)
             _safe_post(f"{HYPERLIQUID_BASE_URL}/hyperliquid/refresh")
-            next_markets = now + MARKETS_REFRESH_SECONDS
+            next_markets = now + MARKETS_EVERY_SECONDS
 
         if now >= next_snapshot:
             log("Refreshing funding arbitrage snapshot")
             _safe_post(f"{FUNDING_ANALYTICS_BASE_URL}/funding/arbitrage/refresh")
-            next_snapshot = now + SNAPSHOT_REFRESH_SECONDS
+            next_snapshot = now + SNAPSHOTS_EVERY_SECONDS
 
         time.sleep(1)
 
@@ -56,7 +64,7 @@ def _run_loop() -> None:
 def main() -> None:
     log(
         "Starting funding scheduler "
-        f"(markets every {MARKETS_REFRESH_SECONDS}s, snapshots every {SNAPSHOT_REFRESH_SECONDS}s)"
+        f"(markets every {MARKETS_EVERY_SECONDS}s, snapshots every {SNAPSHOTS_EVERY_SECONDS}s)"
     )
     _run_loop()
 

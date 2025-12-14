@@ -75,8 +75,8 @@ services:
       BACKPACK_BASE_URL: https://api.backpack.exchange/api/v1
       HYPERLIQUID_BASE_URL: http://data_ingestion:8001
       FUNDING_ANALYTICS_BASE_URL: http://funding_analytics:8002
-      MARKETS_REFRESH_SECONDS: 60
-      SNAPSHOT_REFRESH_SECONDS: 3600
+      MARKETS_EVERY_SECONDS: 60
+      SNAPSHOTS_EVERY_SECONDS: 60
     depends_on:
       - mongo
       - data_ingestion

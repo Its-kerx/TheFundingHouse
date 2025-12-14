@@ -3,6 +3,7 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from itertools import combinations
 from typing import Any, Dict, List, Optional
+import math
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
@@ -110,6 +111,51 @@ def _normalize_live_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
         "apr_percent": apr,
         "abs_apr_percent": abs_apr,
     }
+
+
+def _calc_apr_from_raw(rate: Any, interval_hours: Any) -> Optional[float]:
+    try:
+        r = float(rate)
+        h = float(interval_hours)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(r) or not math.isfinite(h) or h <= 0:
+        return None
+    return r * ((365.0 * 24.0) / h) * 100.0
+
+
+def _add_debug_fields(pair: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Añade campos debug basados en funding_rate raw y funding_interval_hours.
+    Convención de spread: spread = APR_short - APR_long (positivo si el APR del short es mayor).
+    """
+    long_m = pair.get("long_market") or {}
+    short_m = pair.get("short_market") or {}
+
+    l_rate = long_m.get("funding_rate")
+    s_rate = short_m.get("funding_rate")
+    l_int = long_m.get("funding_interval_hours")
+    s_int = short_m.get("funding_interval_hours")
+
+    l_apr_raw = _calc_apr_from_raw(l_rate, l_int)
+    s_apr_raw = _calc_apr_from_raw(s_rate, s_int)
+    spread_raw = None
+    if l_apr_raw is not None and s_apr_raw is not None:
+        spread_raw = s_apr_raw - l_apr_raw  # short APR minus long APR
+
+    pair["debug_long_funding_rate_raw"] = l_rate if l_rate is not None else None
+    pair["debug_long_interval_hours"] = l_int if l_int is not None else None
+    pair["debug_long_apr_from_raw"] = l_apr_raw
+    pair["debug_long_apr_field_used"] = long_m.get("apr_percent")
+
+    pair["debug_short_funding_rate_raw"] = s_rate if s_rate is not None else None
+    pair["debug_short_interval_hours"] = s_int if s_int is not None else None
+    pair["debug_short_apr_from_raw"] = s_apr_raw
+    pair["debug_short_apr_field_used"] = short_m.get("apr_percent")
+
+    pair["debug_spread_apr_from_raw"] = spread_raw
+    pair["debug_spread_apr_field_used"] = pair.get("spread_apr_percent")
+    return pair
 
 
 async def _fetch_all_current_docs() -> Dict[str, List[Dict[str, Any]]]:
@@ -228,12 +274,13 @@ async def compute_arbitrage_pairs(
             pair_id = f"{canonical_symbol}:{ex1}-{ex2}"
 
             results.append(
-                {
-                    'pair_id': pair_id,
-                    'canonical_symbol': canonical_symbol,
-                    'timestamp': pair_ts,
-                    'spread_apr_percent': spread,
-                    'long_market': {
+                _add_debug_fields(
+                    {
+                        'pair_id': pair_id,
+                        'canonical_symbol': canonical_symbol,
+                        'timestamp': pair_ts,
+                        'spread_apr_percent': spread,
+                        'long_market': {
                         'exchange': long_doc.get('exchange'),
                         'symbol': long_doc.get('symbol'),
                         'funding_rate': float(long_doc.get('funding_rate') or 0.0),
@@ -263,8 +310,9 @@ async def compute_arbitrage_pairs(
                             or short_doc.get('funding_timestamp')
                             or pair_ts
                         ),
-                    },
-                }
+                        },
+                    }
+                )
             )
 
     return results
@@ -389,23 +437,154 @@ async def _live_pairs_with_advanced_filters(
 
 async def get_arbitrage_window(
     window_hours: float,
+    N: Optional[int] = None,
+    agg: str = "mean_raw",
+    min_coverage: float = 0.7,
     min_spread_apr_percent: float = 0.0,
     canonical_symbol: Optional[str] = None,
     exchange_in: Optional[List[str]] = None,
     exchange_out: Optional[List[str]] = None,
     limit: int = 100,
 ) -> List[Dict[str, Any]]:
+    """
+    Lee funding_arbitrage_pairs_ts y promedia los ultimos N snapshots por pair_id.
+    Se limita N por par para evitar sesgos de series largas.
+    """
     if funding_pairs_col is None:
         raise HTTPException(500, "Mongo collection funding_arbitrage_pairs_ts not initialized")
 
+    mode = (agg or "mean_raw").strip().lower()
+    allowed = {"mean_raw", "mean_apr", "last_raw", "last_apr"}
+    if mode not in allowed:
+        raise HTTPException(400, f"Invalid agg mode '{agg}'. Allowed: {', '.join(sorted(allowed))}")
+    if min_coverage < 0 or min_coverage > 1:
+        raise HTTPException(400, "min_coverage must be between 0 and 1")
+
     from_ts = now_utc() - timedelta(hours=window_hours)
-    cursor = funding_pairs_col.find({"timestamp": {"$gte": from_ts}})
-    docs = await cursor.to_list(length=100_000)
+
+    pipeline = [
+        {"$match": {"timestamp": {"$gte": from_ts}}},
+        {"$sort": {"timestamp": -1}},
+    ]
+
+    if N is not None:
+        pipeline += [
+            {
+                "$setWindowFields": {
+                    "partitionBy": "$pair_id",
+                    "sortBy": {"timestamp": -1},
+                    "output": {"rn": {"$documentNumber": {}}},
+                }
+            },
+            {"$match": {"rn": {"$lte": N}}},
+        ]
+
+    pipeline.append(
+        {
+            "$group": {
+                "_id": "$pair_id",
+                "avg_spread": {"$avg": "$spread_apr_percent"},
+                "avg_apr": {"$avg": "$apr_percent"},
+                "avg_long_rate": {"$avg": "$long_market.funding_rate"},
+                "avg_short_rate": {"$avg": "$short_market.funding_rate"},
+                "avg_long_apr": {"$avg": "$long_market.apr_percent"},
+                "avg_short_apr": {"$avg": "$short_market.apr_percent"},
+                "min_ts": {"$min": "$timestamp"},
+                "max_ts": {"$max": "$timestamp"},
+                "count": {"$sum": 1},
+                "last_doc": {"$first": "$$ROOT"},
+            }
+        }
+    )
+
+    docs = await funding_pairs_col.aggregate(pipeline).to_list(length=200_000)
     pairs: List[Dict[str, Any]] = []
-    for d in docs:
-        d = dict(d)
-        d.pop("_id", None)
-        pairs.append(d)
+
+    snapshot_interval_seconds = 60.0
+    expected_count = (window_hours * 3600.0) / snapshot_interval_seconds
+
+    for g in docs:
+        last_doc = g.get("last_doc") or {}
+        pair_id = last_doc.get("pair_id")
+        canonical_symbol = last_doc.get("canonical_symbol")
+        window_start_ts = g.get("min_ts")
+        window_end_ts = g.get("max_ts")
+        window_count = g.get("count") or 0
+        coverage_ratio = (window_count / expected_count) if expected_count else 0.0
+        if window_count == 0:
+            coverage_ratio = 0.0
+
+        latest_long = (last_doc.get("long_market") or {}) if last_doc else {}
+        latest_short = (last_doc.get("short_market") or {}) if last_doc else {}
+
+        avg_long_rate = g.get("avg_long_rate")
+        avg_short_rate = g.get("avg_short_rate")
+        avg_long_apr = g.get("avg_long_apr")
+        avg_short_apr = g.get("avg_short_apr")
+
+        def build_side(latest: Dict[str, Any], avg_rate: Any, avg_apr_side: Any):
+            rate_out = None
+            interval_out = latest.get("funding_interval_hours")
+            apr_out = None
+
+            if mode == "mean_raw":
+                rate_out = avg_rate
+                apr_out = _calc_apr_from_raw(rate_out, interval_out)
+            elif mode == "mean_apr":
+                apr_out = avg_apr_side
+                rate_out = avg_rate if avg_rate is not None else latest.get("funding_rate")
+            elif mode == "last_raw":
+                rate_out = latest.get("funding_rate")
+                apr_out = _calc_apr_from_raw(rate_out, interval_out)
+            elif mode == "last_apr":
+                apr_out = latest.get("apr_percent")
+                rate_out = latest.get("funding_rate")
+
+            funding_percent = rate_out * 100.0 if rate_out is not None else None
+
+            return {
+                "exchange": latest.get("exchange"),
+                "symbol": latest.get("symbol"),
+                "funding_rate": rate_out,
+                "funding_percent": funding_percent,
+                "funding_interval_hours": interval_out,
+                "apr_percent": apr_out,
+                "mark_price": latest.get("mark_price") or latest.get("price"),
+                "open_interest": latest.get("open_interest"),
+                "volume_24h": latest.get("volume_24h"),
+                "last_updated": latest.get("timestamp") or latest.get("funding_timestamp"),
+            }
+
+        long_market = build_side(latest_long, avg_long_rate, avg_long_apr)
+        short_market = build_side(latest_short, avg_short_rate, avg_short_apr)
+
+        apr_long = long_market.get("apr_percent")
+        apr_short = short_market.get("apr_percent")
+        spread = None
+        if apr_long is not None and apr_short is not None:
+            try:
+                if math.isfinite(float(apr_long)) and math.isfinite(float(apr_short)):
+                    spread = float(apr_short) - float(apr_long)
+            except (TypeError, ValueError):
+                spread = None
+
+        pair = {
+            "pair_id": pair_id,
+            "canonical_symbol": canonical_symbol,
+            "timestamp": window_end_ts,
+            "spread_apr_percent": spread,
+            "long_market": long_market,
+            "short_market": short_market,
+            "window_start_ts": window_start_ts,
+            "window_end_ts": window_end_ts,
+            "window_count": window_count,
+            "expected_count": expected_count,
+            "coverage_ratio": coverage_ratio,
+            "aggregation_mode": mode,
+            "data_source": "rolling",
+            "confidence": "high" if coverage_ratio and coverage_ratio >= min_coverage else "medium",
+        }
+        pairs.append(_add_debug_fields(pair))
 
     return _filter_pairs(
         pairs,
@@ -415,6 +594,80 @@ async def get_arbitrage_window(
         exchange_out=exchange_out,
         limit=limit,
     )
+
+
+async def _window_or_fallback_live(
+    window_hours: float,
+    N: Optional[int],
+    agg: str,
+    min_coverage: float,
+    min_spread_apr_percent: float,
+    canonical_symbol: Optional[str],
+    exchange_in: Optional[List[str]],
+    exchange_out: Optional[List[str]],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    """
+    Si la ventana no tiene cobertura suficiente o queda vacía, cae a Live.
+    """
+    window_pairs = await get_arbitrage_window(
+        window_hours=window_hours,
+        N=N,
+        agg=agg,
+        min_coverage=min_coverage,
+        min_spread_apr_percent=min_spread_apr_percent,
+        canonical_symbol=canonical_symbol,
+        exchange_in=exchange_in,
+        exchange_out=exchange_out,
+        limit=limit,
+    )
+
+    # Elimina pares sin muestras (evita APR=0 ficticio)
+    window_pairs = [
+        p
+        for p in window_pairs
+        if (p.get("window_count") or 0) > 0 and p.get("spread_apr_percent") is not None
+    ]
+
+    has_coverage = any(
+        (float(p.get("coverage_ratio") or 0) >= min_coverage) for p in window_pairs
+    )
+
+    if window_pairs and has_coverage:
+        for p in window_pairs:
+            p.setdefault("mode", "window")
+            p["data_source"] = "rolling"
+            p["confidence"] = "high"
+        return window_pairs
+
+    # Bootstrap con historia agregada aunque la cobertura sea baja: no inventa datos.
+    if window_pairs:
+        for p in window_pairs:
+            p["mode"] = "bootstrap_history"
+            p["data_source"] = "bootstrap_history"
+            cov = float(p.get("coverage_ratio") or 0.0)
+            p["confidence"] = "medium" if cov >= 0.3 else "low"
+        return window_pairs
+
+    # Fallback a live sin inventar APRs
+    live_pairs = await _compute_live_pairs_filtered(
+        min_spread_apr_percent=min_spread_apr_percent,
+        canonical_symbol=canonical_symbol,
+        exchange_in=exchange_in,
+        exchange_out=exchange_out,
+        limit=limit,
+    )
+    for p in live_pairs:
+        p["mode"] = "fallback_live"
+        p["reason"] = "window_not_ready"
+        p["data_source"] = "live_fallback"
+        p["confidence"] = "low"
+        p.setdefault("coverage_ratio", None)
+        p.setdefault("expected_count", None)
+        p.setdefault("window_count", None)
+        p.setdefault("window_start_ts", None)
+        p.setdefault("window_end_ts", None)
+    return live_pairs
 
 
 # -------------------------
@@ -432,6 +685,14 @@ async def startup_event():
     backpack_current_col = db[COL_BACKPACK_CURRENT]
     funding_ts_col = db[COL_FUNDING_TS]
     funding_pairs_col = db[COL_FUNDING_PAIRS_TS]
+
+    # Indexes for faster window queries (idempotent)
+    try:
+        await funding_pairs_col.create_index([("pair_id", 1), ("timestamp", -1)])
+        await funding_pairs_col.create_index([("timestamp", -1)])
+    except Exception as exc:
+        # avoid startup crash if index creation fails; log to stdout
+        print(f"[startup] Index creation warning: {exc}", flush=True)
 
 
 @app.on_event("shutdown")
@@ -532,73 +793,8 @@ async def refresh_arbitrage_pairs():
     }
 
 
-@app.get("/funding/1h", response_model=List[Dict[str, Any]])
-async def funding_1h(
-    canonical_symbol: Optional[str] = Query(
-        default=None,
-        description="Filtra por canonical_symbol (BTC, ETH, PIPE, ...)",
-    ),
-    exchange_in: Optional[List[str]] = Query(
-        default=None,
-        description="Si se indica, ambos exchanges deben pertenecer a este conjunto.",
-    ),
-    exchange_out: Optional[List[str]] = Query(
-        default=None,
-        description="Excluye pares que contengan cualquiera de estos exchanges.",
-    ),
-    min_spread_apr_percent: float = Query(
-        default=0.0,
-        ge=0.0,
-        description=(
-            "Minimo spread de APR entre LONG y SHORT. "
-            "Ej: 20 => solo pares con diferencia de APR >= 20 puntos."
-        ),
-    ),
-    min_abs_apr_each_side: float = Query(
-        default=0.0,
-        ge=0.0,
-        description=(
-            "Minimo |APR| que debe tener tanto el lado LONG como el SHORT. "
-            "Ej: 10 => ambos lados deben tener |APR|>=10."
-        ),
-    ),
-    min_oi: float = Query(
-        default=0.0,
-        ge=0.0,
-        description="Minimo open interest requerido en ambos lados (0 = sin filtro).",
-    ),
-    min_volume_24h: float = Query(
-        default=0.0,
-        ge=0.0,
-        description="Minimo volumen 24h requerido en ambos lados (0 = sin filtro).",
-    ),
-    limit: int = Query(
-        default=100,
-        ge=1,
-        le=5000,
-        description="Numero maximo de pares a devolver.",
-    ),
-):
-    """
-    Alias en vivo de arbitraje de funding (calcula sin leer historico 1h).
-    """
-    try:
-        return await _live_pairs_with_advanced_filters(
-            min_spread_apr_percent=min_spread_apr_percent,
-            canonical_symbol=canonical_symbol,
-            exchange_in=exchange_in,
-            exchange_out=exchange_out,
-            min_abs_apr_each_side=min_abs_apr_each_side,
-            min_oi=min_oi,
-            min_volume_24h=min_volume_24h,
-            limit=limit,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error calculando arbitraje Live: {e}")
-
-
 # -------------------------
-# VENTANAS (8h, 24h, 3d, 7d, 15d, 31d)
+# VENTANAS (1h, 8h, 24h, 3d, 7d, 15d, 31d)
 # -------------------------
 
 common_canonical = Query(
@@ -626,6 +822,40 @@ common_limit_pairs = Query(
 )
 
 
+@app.get("/funding/1h", response_model=List[Dict[str, Any]])
+async def funding_1h(
+    canonical_symbol: Optional[str] = common_canonical,
+    min_spread_apr_percent: float = common_min_spread,
+    exchange_in: Optional[List[str]] = common_exchange_in,
+    exchange_out: Optional[List[str]] = common_exchange_out,
+    limit: int = common_limit_pairs,
+    agg: str = Query(
+        default="mean_raw",
+        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
+    ),
+    min_coverage: float = Query(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Coverage threshold (0-1) to decide fallback to live",
+    ),
+):
+    """
+    Ventana 1h: promedia ultimos N snapshots por pair_id (asumiendo 1/min).
+    """
+    return await _window_or_fallback_live(
+        window_hours=1.0,
+        N=60,
+        agg=agg,
+        min_coverage=min_coverage,
+        min_spread_apr_percent=min_spread_apr_percent,
+        canonical_symbol=canonical_symbol,
+        exchange_in=exchange_in,
+        exchange_out=exchange_out,
+        limit=limit,
+    )
+
+
 @app.get("/funding/8h", response_model=List[Dict[str, Any]])
 async def funding_8h(
     canonical_symbol: Optional[str] = common_canonical,
@@ -633,9 +863,22 @@ async def funding_8h(
     exchange_in: Optional[List[str]] = common_exchange_in,
     exchange_out: Optional[List[str]] = common_exchange_out,
     limit: int = common_limit_pairs,
+    agg: str = Query(
+        default="mean_raw",
+        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
+    ),
+    min_coverage: float = Query(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Coverage threshold (0-1) to decide fallback to live",
+    ),
 ):
-    return await get_arbitrage_window(
+    return await _window_or_fallback_live(
         window_hours=8.0,
+        N=480,
+        agg=agg,
+        min_coverage=min_coverage,
         min_spread_apr_percent=min_spread_apr_percent,
         canonical_symbol=canonical_symbol,
         exchange_in=exchange_in,
@@ -651,15 +894,156 @@ async def funding_24h(
     exchange_in: Optional[List[str]] = common_exchange_in,
     exchange_out: Optional[List[str]] = common_exchange_out,
     limit: int = common_limit_pairs,
+    agg: str = Query(
+        default="mean_raw",
+        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
+    ),
+    min_coverage: float = Query(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Coverage threshold (0-1) to decide fallback to live",
+    ),
 ):
-    return await get_arbitrage_window(
+    return await _window_or_fallback_live(
         window_hours=24.0,
+        N=1440,
+        agg=agg,
+        min_coverage=min_coverage,
         min_spread_apr_percent=min_spread_apr_percent,
         canonical_symbol=canonical_symbol,
         exchange_in=exchange_in,
         exchange_out=exchange_out,
         limit=limit,
     )
+
+
+@app.get("/funding/3d", response_model=List[Dict[str, Any]])
+async def funding_3d(
+    canonical_symbol: Optional[str] = common_canonical,
+    min_spread_apr_percent: float = common_min_spread,
+    exchange_in: Optional[List[str]] = common_exchange_in,
+    exchange_out: Optional[List[str]] = common_exchange_out,
+    limit: int = common_limit_pairs,
+    agg: str = Query(
+        default="mean_raw",
+        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
+    ),
+    min_coverage: float = Query(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Coverage threshold (0-1) to decide fallback to live",
+    ),
+):
+    return await _window_or_fallback_live(
+        window_hours=72.0,
+        N=4320,
+        agg=agg,
+        min_coverage=min_coverage,
+        min_spread_apr_percent=min_spread_apr_percent,
+        canonical_symbol=canonical_symbol,
+        exchange_in=exchange_in,
+        exchange_out=exchange_out,
+        limit=limit,
+    )
+
+
+@app.get("/funding/7d", response_model=List[Dict[str, Any]])
+async def funding_7d(
+    canonical_symbol: Optional[str] = common_canonical,
+    min_spread_apr_percent: float = common_min_spread,
+    exchange_in: Optional[List[str]] = common_exchange_in,
+    exchange_out: Optional[List[str]] = common_exchange_out,
+    limit: int = common_limit_pairs,
+    agg: str = Query(
+        default="mean_raw",
+        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
+    ),
+    min_coverage: float = Query(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Coverage threshold (0-1) to decide fallback to live",
+    ),
+):
+    return await _window_or_fallback_live(
+        window_hours=168.0,
+        N=10080,
+        agg=agg,
+        min_coverage=min_coverage,
+        min_spread_apr_percent=min_spread_apr_percent,
+        canonical_symbol=canonical_symbol,
+        exchange_in=exchange_in,
+        exchange_out=exchange_out,
+        limit=limit,
+    )
+
+
+@app.get("/funding/15d", response_model=List[Dict[str, Any]])
+async def funding_15d(
+    canonical_symbol: Optional[str] = common_canonical,
+    min_spread_apr_percent: float = common_min_spread,
+    exchange_in: Optional[List[str]] = common_exchange_in,
+    exchange_out: Optional[List[str]] = common_exchange_out,
+    limit: int = common_limit_pairs,
+    agg: str = Query(
+        default="mean_raw",
+        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
+    ),
+    min_coverage: float = Query(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Coverage threshold (0-1) to decide fallback to live",
+    ),
+):
+    return await _window_or_fallback_live(
+        window_hours=360.0,
+        N=21600,
+        agg=agg,
+        min_coverage=min_coverage,
+        min_spread_apr_percent=min_spread_apr_percent,
+        canonical_symbol=canonical_symbol,
+        exchange_in=exchange_in,
+        exchange_out=exchange_out,
+        limit=limit,
+    )
+
+
+@app.get("/funding/31d", response_model=List[Dict[str, Any]])
+async def funding_31d(
+    canonical_symbol: Optional[str] = common_canonical,
+    min_spread_apr_percent: float = common_min_spread,
+    exchange_in: Optional[List[str]] = common_exchange_in,
+    exchange_out: Optional[List[str]] = common_exchange_out,
+    limit: int = common_limit_pairs,
+    agg: str = Query(
+        default="mean_raw",
+        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
+    ),
+    min_coverage: float = Query(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Coverage threshold (0-1) to decide fallback to live",
+    ),
+):
+    return await _window_or_fallback_live(
+        window_hours=744.0,
+        N=44640,
+        agg=agg,
+        min_coverage=min_coverage,
+        min_spread_apr_percent=min_spread_apr_percent,
+        canonical_symbol=canonical_symbol,
+        exchange_in=exchange_in,
+        exchange_out=exchange_out,
+        limit=limit,
+    )
+
+
+# Self-check: ensure app is importable
+_app_self_check = app
 
 
 # -------------------------

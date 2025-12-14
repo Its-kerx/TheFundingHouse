@@ -147,6 +147,78 @@ async def proxy_funding_live(
     return JSONResponse(content=data)
 
 
+async def _proxy_funding_window(window: str, query: dict):
+    upstream_url = FUNDING_ANALYTICS_BASE_URL.rstrip("/") + f"/funding/{window}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(upstream_url, params=query)
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Error calling funding-analytics: {exc}",
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": f"Funding {window} service returned error",
+                "status": resp.status_code,
+                "body": resp.text,
+            },
+        )
+    return JSONResponse(content=resp.json())
+
+
+@app.get("/api/funding/1h")
+async def proxy_funding_1h(min_spread_apr_percent: float = 0.0, limit: int = 100):
+    return await _proxy_funding_window(
+        "1h", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
+    )
+
+
+@app.get("/api/funding/8h")
+async def proxy_funding_8h(min_spread_apr_percent: float = 0.0, limit: int = 100):
+    return await _proxy_funding_window(
+        "8h", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
+    )
+
+
+@app.get("/api/funding/24h")
+async def proxy_funding_24h(min_spread_apr_percent: float = 0.0, limit: int = 100):
+    return await _proxy_funding_window(
+        "24h", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
+    )
+
+
+@app.get("/api/funding/3d")
+async def proxy_funding_3d(min_spread_apr_percent: float = 0.0, limit: int = 100):
+    return await _proxy_funding_window(
+        "3d", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
+    )
+
+
+@app.get("/api/funding/7d")
+async def proxy_funding_7d(min_spread_apr_percent: float = 0.0, limit: int = 100):
+    return await _proxy_funding_window(
+        "7d", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
+    )
+
+
+@app.get("/api/funding/15d")
+async def proxy_funding_15d(min_spread_apr_percent: float = 0.0, limit: int = 100):
+    return await _proxy_funding_window(
+        "15d", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
+    )
+
+
+@app.get("/api/funding/31d")
+async def proxy_funding_31d(min_spread_apr_percent: float = 0.0, limit: int = 100):
+    return await _proxy_funding_window(
+        "31d", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
+    )
+
+
 def _pick_extension(content_type: str) -> str:
     ctype = (content_type or "").split(";")[0].strip().lower()
     if ctype == "image/png":
