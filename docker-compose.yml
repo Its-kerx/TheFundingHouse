@@ -72,7 +72,8 @@ services:
     command: ["python", "-m", "funding_scheduler"]
     restart: unless-stopped
     environment:
-      BACKPACK_BASE_URL: https://api.backpack.exchange/api/v1
+      DATA_INGESTION_BASE_URL: http://data_ingestion:8001
+      BACKPACK_BASE_URL: http://data_ingestion:8001
       HYPERLIQUID_BASE_URL: http://data_ingestion:8001
       FUNDING_ANALYTICS_BASE_URL: http://funding_analytics:8002
       MARKETS_EVERY_SECONDS: 60
