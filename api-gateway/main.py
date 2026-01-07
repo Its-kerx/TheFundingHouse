@@ -10,14 +10,19 @@ import asyncio
 import logging
 import os
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response
+import jwt
+from eth_account.messages import encode_defunct
+from eth_account import Account
+from siwe import SiweMessage
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+import secrets
 
 GATEWAY_PORT = 3000
 DATA_INGESTION_URL = os.getenv("DATA_INGESTION_URL", "http://localhost:8001")
@@ -33,6 +38,18 @@ SYMBOL_OVERRIDES = {
     "OP": "optimism",
 }
 LOGO_TTL_SECONDS = 7 * 24 * 3600
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-please-change")
+JWT_ALGO = "HS256"
+
+ALLOWED_SIWE_DOMAINS = [d.strip() for d in os.getenv("ALLOWED_SIWE_DOMAINS", "localhost").split(",") if d.strip()]
+ALLOWED_SIWE_URIS = [u.strip() for u in os.getenv("ALLOWED_SIWE_URIS", "").split(",") if u.strip()]
+ALLOWED_CHAIN_IDS = {int(x) for x in os.getenv("ALLOWED_CHAIN_IDS", "1,137").split(",") if x.strip().isdigit()}
+PORTFOLIO_PROVIDER = os.getenv("PORTFOLIO_PROVIDER", "covalent").lower()
+COVALENT_API_KEY = os.getenv("COVALENT_API_KEY")
+
+# nonce store (in-memory, ttl 5m)
+NONCE_STORE: Dict[str, datetime] = {}
+NONCE_TTL = timedelta(minutes=5)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,6 +86,174 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     logger.info(f"[DONE] {request.method} {request.url.path} - {response.status_code}")
     return response
+
+
+def _prune_nonces():
+    now = datetime.now(timezone.utc)
+    expired = [n for n, ts in NONCE_STORE.items() if ts < now]
+    for n in expired:
+        NONCE_STORE.pop(n, None)
+
+
+def _generate_nonce() -> str:
+    _prune_nonces()
+    nonce = secrets.token_urlsafe(16)
+    NONCE_STORE[nonce] = datetime.now(timezone.utc) + NONCE_TTL
+    return nonce
+
+
+def _consume_nonce(nonce: str) -> bool:
+    _prune_nonces()
+    ts = NONCE_STORE.pop(nonce, None)
+    return ts is not None
+
+
+def _issue_jwt(address: str) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": address.lower(),
+        "roles": ["user"],
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(hours=24)).timestamp()),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+
+
+async def get_current_user(request: Request):
+    auth = request.headers.get("Authorization")
+    if not auth or not auth.lower().startswith("bearer "):
+        raise HTTPException(401, "Missing bearer token")
+    token = auth.split(" ", 1)[1]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+        return payload
+    except Exception as exc:
+        raise HTTPException(401, f"Invalid token: {exc}")
+
+
+@app.get("/auth/nonce")
+async def auth_nonce():
+    """
+    Devuelve un nonce SIWE (ttl 5 min).
+    """
+    nonce = _generate_nonce()
+    return {"nonce": nonce}
+
+
+@app.post("/auth/verify")
+async def auth_verify(body: Dict[str, Any]):
+    """
+    Verifica SIWE message + signature y devuelve JWT bearer.
+    """
+    message = body.get("message")
+    signature = body.get("signature")
+    if not message or not signature:
+        raise HTTPException(400, "Missing message or signature")
+
+    try:
+        siwe_msg = SiweMessage(message)
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid SIWE message: {exc}")
+
+    # domain / uri / chain checks
+    if siwe_msg.domain not in ALLOWED_SIWE_DOMAINS:
+        raise HTTPException(400, "Domain not allowed")
+    if ALLOWED_SIWE_URIS and siwe_msg.uri not in ALLOWED_SIWE_URIS:
+        raise HTTPException(400, "URI not allowed")
+    if ALLOWED_CHAIN_IDS and siwe_msg.chain_id not in ALLOWED_CHAIN_IDS:
+        raise HTTPException(400, "chainId not allowed")
+
+    nonce = siwe_msg.nonce
+    if not nonce or nonce not in NONCE_STORE:
+        raise HTTPException(400, "Nonce not found or expired")
+
+    try:
+        # siwe verify already checks nonce/domain; we enforce nonce manually, too
+        siwe_msg.verify(signature=signature, nonce=nonce)
+    except Exception as exc:
+        raise HTTPException(400, f"Signature verification failed: {exc}")
+
+    # consume nonce (single use)
+    if not _consume_nonce(nonce):
+        raise HTTPException(400, "Nonce invalidated")
+
+    # recover address for consistency
+    try:
+        message_hash = encode_defunct(text=siwe_msg.prepare_message())
+        recovered = Account.recover_message(message_hash, signature=signature)
+    except Exception:
+        recovered = siwe_msg.address
+
+    token = _issue_jwt(recovered)
+    logger.info(f"[auth] SIWE verified for {recovered}")
+    return {"access_token": token, "token_type": "bearer", "address": recovered}
+
+
+@app.get("/auth/me")
+async def auth_me(user=Depends(get_current_user)):
+    try:
+        return {"address": user.get("sub"), "exp": user.get("exp")}
+    except Exception:
+        raise HTTPException(400, "Invalid token payload")
+
+
+@app.get("/portfolio/overview")
+async def portfolio_overview(user=Depends(get_current_user)):
+    """
+    Protected: returns portfolio overview via configured provider (covalent).
+    """
+    address = (user.get("sub") or "").lower()
+    if not address:
+        raise HTTPException(400, "No address in token")
+    if PORTFOLIO_PROVIDER != "covalent":
+        raise HTTPException(503, "Portfolio provider not configured")
+    if not COVALENT_API_KEY:
+        raise HTTPException(503, "COVALENT_API_KEY missing")
+
+    chain_id = sorted(ALLOWED_CHAIN_IDS)[0] if ALLOWED_CHAIN_IDS else 1
+    url = f"https://api.covalenthq.com/v1/{chain_id}/address/{address}/balances_v2/"
+    params = {"key": COVALENT_API_KEY}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, params=params)
+    except Exception as exc:
+        raise HTTPException(502, f"Covalent error: {exc}")
+
+    if resp.status_code != 200:
+        raise HTTPException(resp.status_code, f"Covalent returned {resp.status_code}: {resp.text[:200]}")
+
+    data = resp.json() or {}
+    items = (data.get("data") or {}).get("items") or []
+    native = None
+    tokens = []
+    total_usd = 0.0
+    for it in items:
+        contract_decimals = it.get("contract_decimals") or 0
+        balance_raw = it.get("balance") or "0"
+        try:
+            bal = int(balance_raw)
+        except Exception:
+            bal = 0
+        usd = it.get("quote") or 0.0
+        total_usd += float(usd or 0.0)
+        entry = {
+            "symbol": it.get("contract_ticker_symbol"),
+            "balance": balance_raw,
+            "decimals": contract_decimals,
+            "usd": usd,
+        }
+        if it.get("type") == "cryptocurrency" and it.get("native_token"):
+            native = entry
+        else:
+            tokens.append(entry)
+
+    return {
+        "address": address,
+        "chain_id": chain_id,
+        "native": native,
+        "tokens": tokens,
+        "total_usd": total_usd,
+    }
 
 
 @app.api_route(
