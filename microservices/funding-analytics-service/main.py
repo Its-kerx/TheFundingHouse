@@ -80,8 +80,7 @@ def _normalize_live_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
         interval = 1.0
 
     funding_percent = funding_rate * 100.0
-    periods_per_year = (365.0 * 24.0) / interval
-    apr = funding_rate * periods_per_year * 100.0
+    apr = annualize_funding(funding_rate, interval)
     abs_apr = abs(apr)
 
     # timestamp del snapshot / funding
@@ -821,225 +820,60 @@ common_limit_pairs = Query(
     description="Maximo numero de pares devueltos",
 )
 
+common_agg = Query(
+    default="mean_raw",
+    description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
+)
+common_min_coverage = Query(
+    default=0.7,
+    ge=0.0,
+    le=1.0,
+    description="Coverage threshold (0-1) to decide fallback to live",
+)
 
-@app.get("/funding/1h", response_model=List[Dict[str, Any]])
-async def funding_1h(
-    canonical_symbol: Optional[str] = common_canonical,
-    min_spread_apr_percent: float = common_min_spread,
-    exchange_in: Optional[List[str]] = common_exchange_in,
-    exchange_out: Optional[List[str]] = common_exchange_out,
-    limit: int = common_limit_pairs,
-    agg: str = Query(
-        default="mean_raw",
-        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
-    ),
-    min_coverage: float = Query(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Coverage threshold (0-1) to decide fallback to live",
-    ),
-):
-    """
-    Ventana 1h: promedia ultimos N snapshots por pair_id (asumiendo 1/min).
-    """
-    return await _window_or_fallback_live(
-        window_hours=1.0,
-        N=60,
-        agg=agg,
-        min_coverage=min_coverage,
-        min_spread_apr_percent=min_spread_apr_percent,
-        canonical_symbol=canonical_symbol,
-        exchange_in=exchange_in,
-        exchange_out=exchange_out,
-        limit=limit,
-    )
+FUNDING_WINDOWS = [
+    ("1h", 1.0, 60),
+    ("8h", 8.0, 480),
+    ("24h", 24.0, 1440),
+    ("3d", 72.0, 4320),
+    ("7d", 168.0, 10080),
+    ("15d", 360.0, 21600),
+    ("31d", 744.0, 44640),
+]
 
 
-@app.get("/funding/8h", response_model=List[Dict[str, Any]])
-async def funding_8h(
-    canonical_symbol: Optional[str] = common_canonical,
-    min_spread_apr_percent: float = common_min_spread,
-    exchange_in: Optional[List[str]] = common_exchange_in,
-    exchange_out: Optional[List[str]] = common_exchange_out,
-    limit: int = common_limit_pairs,
-    agg: str = Query(
-        default="mean_raw",
-        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
-    ),
-    min_coverage: float = Query(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Coverage threshold (0-1) to decide fallback to live",
-    ),
-):
-    return await _window_or_fallback_live(
-        window_hours=8.0,
-        N=480,
-        agg=agg,
-        min_coverage=min_coverage,
-        min_spread_apr_percent=min_spread_apr_percent,
-        canonical_symbol=canonical_symbol,
-        exchange_in=exchange_in,
-        exchange_out=exchange_out,
-        limit=limit,
-    )
+def _register_funding_window_routes() -> None:
+    def _make_window_handler(window_hours: float, count: int):
+        async def _handler(
+            canonical_symbol: Optional[str] = common_canonical,
+            min_spread_apr_percent: float = common_min_spread,
+            exchange_in: Optional[List[str]] = common_exchange_in,
+            exchange_out: Optional[List[str]] = common_exchange_out,
+            limit: int = common_limit_pairs,
+            agg: str = common_agg,
+            min_coverage: float = common_min_coverage,
+        ):
+            return await _window_or_fallback_live(
+                window_hours=window_hours,
+                N=count,
+                agg=agg,
+                min_coverage=min_coverage,
+                min_spread_apr_percent=min_spread_apr_percent,
+                canonical_symbol=canonical_symbol,
+                exchange_in=exchange_in,
+                exchange_out=exchange_out,
+                limit=limit,
+            )
+
+        return _handler
+
+    for window, hours, count in FUNDING_WINDOWS:
+        handler = _make_window_handler(hours, count)
+        handler.__name__ = f"funding_{window}"
+        app.get(f"/funding/{window}", response_model=List[Dict[str, Any]])(handler)
 
 
-@app.get("/funding/24h", response_model=List[Dict[str, Any]])
-async def funding_24h(
-    canonical_symbol: Optional[str] = common_canonical,
-    min_spread_apr_percent: float = common_min_spread,
-    exchange_in: Optional[List[str]] = common_exchange_in,
-    exchange_out: Optional[List[str]] = common_exchange_out,
-    limit: int = common_limit_pairs,
-    agg: str = Query(
-        default="mean_raw",
-        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
-    ),
-    min_coverage: float = Query(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Coverage threshold (0-1) to decide fallback to live",
-    ),
-):
-    return await _window_or_fallback_live(
-        window_hours=24.0,
-        N=1440,
-        agg=agg,
-        min_coverage=min_coverage,
-        min_spread_apr_percent=min_spread_apr_percent,
-        canonical_symbol=canonical_symbol,
-        exchange_in=exchange_in,
-        exchange_out=exchange_out,
-        limit=limit,
-    )
-
-
-@app.get("/funding/3d", response_model=List[Dict[str, Any]])
-async def funding_3d(
-    canonical_symbol: Optional[str] = common_canonical,
-    min_spread_apr_percent: float = common_min_spread,
-    exchange_in: Optional[List[str]] = common_exchange_in,
-    exchange_out: Optional[List[str]] = common_exchange_out,
-    limit: int = common_limit_pairs,
-    agg: str = Query(
-        default="mean_raw",
-        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
-    ),
-    min_coverage: float = Query(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Coverage threshold (0-1) to decide fallback to live",
-    ),
-):
-    return await _window_or_fallback_live(
-        window_hours=72.0,
-        N=4320,
-        agg=agg,
-        min_coverage=min_coverage,
-        min_spread_apr_percent=min_spread_apr_percent,
-        canonical_symbol=canonical_symbol,
-        exchange_in=exchange_in,
-        exchange_out=exchange_out,
-        limit=limit,
-    )
-
-
-@app.get("/funding/7d", response_model=List[Dict[str, Any]])
-async def funding_7d(
-    canonical_symbol: Optional[str] = common_canonical,
-    min_spread_apr_percent: float = common_min_spread,
-    exchange_in: Optional[List[str]] = common_exchange_in,
-    exchange_out: Optional[List[str]] = common_exchange_out,
-    limit: int = common_limit_pairs,
-    agg: str = Query(
-        default="mean_raw",
-        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
-    ),
-    min_coverage: float = Query(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Coverage threshold (0-1) to decide fallback to live",
-    ),
-):
-    return await _window_or_fallback_live(
-        window_hours=168.0,
-        N=10080,
-        agg=agg,
-        min_coverage=min_coverage,
-        min_spread_apr_percent=min_spread_apr_percent,
-        canonical_symbol=canonical_symbol,
-        exchange_in=exchange_in,
-        exchange_out=exchange_out,
-        limit=limit,
-    )
-
-
-@app.get("/funding/15d", response_model=List[Dict[str, Any]])
-async def funding_15d(
-    canonical_symbol: Optional[str] = common_canonical,
-    min_spread_apr_percent: float = common_min_spread,
-    exchange_in: Optional[List[str]] = common_exchange_in,
-    exchange_out: Optional[List[str]] = common_exchange_out,
-    limit: int = common_limit_pairs,
-    agg: str = Query(
-        default="mean_raw",
-        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
-    ),
-    min_coverage: float = Query(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Coverage threshold (0-1) to decide fallback to live",
-    ),
-):
-    return await _window_or_fallback_live(
-        window_hours=360.0,
-        N=21600,
-        agg=agg,
-        min_coverage=min_coverage,
-        min_spread_apr_percent=min_spread_apr_percent,
-        canonical_symbol=canonical_symbol,
-        exchange_in=exchange_in,
-        exchange_out=exchange_out,
-        limit=limit,
-    )
-
-
-@app.get("/funding/31d", response_model=List[Dict[str, Any]])
-async def funding_31d(
-    canonical_symbol: Optional[str] = common_canonical,
-    min_spread_apr_percent: float = common_min_spread,
-    exchange_in: Optional[List[str]] = common_exchange_in,
-    exchange_out: Optional[List[str]] = common_exchange_out,
-    limit: int = common_limit_pairs,
-    agg: str = Query(
-        default="mean_raw",
-        description="Aggregation mode: mean_raw|mean_apr|last_raw|last_apr",
-    ),
-    min_coverage: float = Query(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Coverage threshold (0-1) to decide fallback to live",
-    ),
-):
-    return await _window_or_fallback_live(
-        window_hours=744.0,
-        N=44640,
-        agg=agg,
-        min_coverage=min_coverage,
-        min_spread_apr_percent=min_spread_apr_percent,
-        canonical_symbol=canonical_symbol,
-        exchange_in=exchange_in,
-        exchange_out=exchange_out,
-        limit=limit,
-    )
+_register_funding_window_routes()
 
 
 # Self-check: ensure app is importable

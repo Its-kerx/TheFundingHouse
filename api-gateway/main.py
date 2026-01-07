@@ -360,53 +360,29 @@ async def _proxy_funding_window(window: str, query: dict):
     return JSONResponse(content=resp.json())
 
 
-@app.get("/api/funding/1h")
-async def proxy_funding_1h(min_spread_apr_percent: float = 0.0, limit: int = 100):
-    return await _proxy_funding_window(
-        "1h", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
-    )
+FUNDING_WINDOWS = ["1h", "8h", "24h", "3d", "7d", "15d", "31d"]
 
 
-@app.get("/api/funding/8h")
-async def proxy_funding_8h(min_spread_apr_percent: float = 0.0, limit: int = 100):
-    return await _proxy_funding_window(
-        "8h", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
-    )
+def _register_proxy_window_routes() -> None:
+    def _make_proxy_handler(window: str):
+        async def _handler(
+            min_spread_apr_percent: float = 0.0,
+            limit: int = 100,
+        ):
+            return await _proxy_funding_window(
+                window,
+                {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit},
+            )
+
+        return _handler
+
+    for window in FUNDING_WINDOWS:
+        handler = _make_proxy_handler(window)
+        handler.__name__ = f"proxy_funding_{window}"
+        app.get(f"/api/funding/{window}")(handler)
 
 
-@app.get("/api/funding/24h")
-async def proxy_funding_24h(min_spread_apr_percent: float = 0.0, limit: int = 100):
-    return await _proxy_funding_window(
-        "24h", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
-    )
-
-
-@app.get("/api/funding/3d")
-async def proxy_funding_3d(min_spread_apr_percent: float = 0.0, limit: int = 100):
-    return await _proxy_funding_window(
-        "3d", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
-    )
-
-
-@app.get("/api/funding/7d")
-async def proxy_funding_7d(min_spread_apr_percent: float = 0.0, limit: int = 100):
-    return await _proxy_funding_window(
-        "7d", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
-    )
-
-
-@app.get("/api/funding/15d")
-async def proxy_funding_15d(min_spread_apr_percent: float = 0.0, limit: int = 100):
-    return await _proxy_funding_window(
-        "15d", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
-    )
-
-
-@app.get("/api/funding/31d")
-async def proxy_funding_31d(min_spread_apr_percent: float = 0.0, limit: int = 100):
-    return await _proxy_funding_window(
-        "31d", {"min_spread_apr_percent": min_spread_apr_percent, "limit": limit}
-    )
+_register_proxy_window_routes()
 
 
 def _pick_extension(content_type: str) -> str:

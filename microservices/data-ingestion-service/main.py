@@ -54,6 +54,25 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _compute_funding_metrics(
+    rate: Any,
+    interval_hours: Any,
+) -> Dict[str, float]:
+    funding_rate = float(rate or 0.0)
+    interval = float(interval_hours or FUNDING_INTERVAL_HOURS_DEFAULT)
+    if interval <= 0:
+        interval = FUNDING_INTERVAL_HOURS_DEFAULT
+    funding_percent = funding_rate * 100.0
+    periods_per_year = (365.0 * 24.0) / interval
+    apr_percent = funding_rate * periods_per_year * 100.0
+    return {
+        "funding_rate": funding_rate,
+        "funding_interval_hours": interval,
+        "funding_percent": funding_percent,
+        "apr_percent": apr_percent,
+    }
+
+
 def canonical_symbol_from_snapshot(snap: Dict[str, Any]) -> str:
     """
     Intenta generar un canonical_symbol común entre exchanges.
@@ -81,6 +100,36 @@ def canonical_symbol_from_snapshot(snap: Dict[str, Any]) -> str:
     return symbol
 
 
+def _group_markets_by_token(
+    exchange_name: str,
+    markets: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for snap in markets:
+        token = canonical_symbol_from_snapshot(snap)
+        if not token:
+            continue
+
+        price = (
+            snap.get("mark_price")
+            or snap.get("index_price")
+            or snap.get("oracle_price")
+        )
+
+        payload = {
+            "exchange": exchange_name,
+            "symbol": snap.get("symbol"),
+            "funding_rate": snap.get("funding_rate"),
+            "timestamp": snap.get("timestamp"),
+            "open_interest": snap.get("open_interest"),
+            "volume_24h": snap.get("volume_24h"),
+            "price": price,
+        }
+
+        grouped.setdefault(token, {})[exchange_name] = payload
+    return grouped
+
+
 async def insert_funding_timeseries(snapshot: Dict[str, Any]) -> None:
     """
     Inserta una fila en funding_timeseries con campos normalizados.
@@ -88,15 +137,14 @@ async def insert_funding_timeseries(snapshot: Dict[str, Any]) -> None:
     if funding_ts_col is None:
         raise RuntimeError("Mongo funding_ts_col not initialized")
 
-    funding_rate = float(snapshot.get("funding_rate") or 0.0)
-    interval_hours = float(
-        snapshot.get("funding_interval_hours") or FUNDING_INTERVAL_HOURS_DEFAULT
+    metrics = _compute_funding_metrics(
+        snapshot.get("funding_rate"),
+        snapshot.get("funding_interval_hours"),
     )
-    if interval_hours <= 0:
-        interval_hours = FUNDING_INTERVAL_HOURS_DEFAULT
-    funding_percent = funding_rate * 100.0
-    periods_per_year = (365.0 * 24.0) / interval_hours
-    apr_percent = funding_rate * periods_per_year * 100.0
+    funding_rate = metrics["funding_rate"]
+    interval_hours = metrics["funding_interval_hours"]
+    funding_percent = metrics["funding_percent"]
+    apr_percent = metrics["apr_percent"]
     timestamp = snapshot.get("timestamp") or now_utc()
 
     doc = {
@@ -130,25 +178,19 @@ async def upsert_current_and_ts(col, snapshot: Dict[str, Any]) -> None:
         snapshot
     )
 
+    metrics = _compute_funding_metrics(
+        snapshot.get("funding_rate"),
+        snapshot.get("funding_interval_hours"),
+    )
     normalized = {
         **snapshot,
         "canonical_symbol": canonical,
-        "funding_rate": float(snapshot.get("funding_rate") or 0.0),
-        "funding_interval_hours": float(
-            snapshot.get("funding_interval_hours") or FUNDING_INTERVAL_HOURS_DEFAULT
-        ),
+        "funding_rate": metrics["funding_rate"],
+        "funding_interval_hours": metrics["funding_interval_hours"],
+        "funding_percent": metrics["funding_percent"],
+        "apr_percent": metrics["apr_percent"],
         "timestamp": snapshot.get("timestamp") or now_utc(),
     }
-    if normalized["funding_interval_hours"] <= 0:
-        normalized["funding_interval_hours"] = FUNDING_INTERVAL_HOURS_DEFAULT
-    # Derivados estandarizados
-    funding_rate = normalized["funding_rate"]
-    interval_hours = normalized["funding_interval_hours"]
-    funding_percent = funding_rate * 100.0
-    periods_per_year = (365.0 * 24.0) / interval_hours
-    apr_percent = funding_rate * periods_per_year * 100.0
-    normalized["funding_percent"] = funding_percent
-    normalized["apr_percent"] = apr_percent
 
     key = {
         "exchange": normalized["exchange"],
@@ -229,15 +271,14 @@ async def _bootstrap_funding_history_internal(days: int = 30) -> Dict[str, Any]:
             canonical = canonical_symbol_from_snapshot({"symbol": symbol})
 
             for snap in snapshots:
-                funding_rate = float(snap.get("funding_rate") or 0.0)
-                interval_hours = float(
-                    snap.get("funding_interval_hours") or FUNDING_INTERVAL_HOURS_DEFAULT
+                metrics = _compute_funding_metrics(
+                    snap.get("funding_rate"),
+                    snap.get("funding_interval_hours"),
                 )
-                if interval_hours <= 0:
-                    interval_hours = FUNDING_INTERVAL_HOURS_DEFAULT
-                funding_percent = funding_rate * 100.0
-                periods_per_year = (365.0 * 24.0) / interval_hours
-                apr_percent = funding_rate * periods_per_year * 100.0
+                funding_rate = metrics["funding_rate"]
+                interval_hours = metrics["funding_interval_hours"]
+                funding_percent = metrics["funding_percent"]
+                apr_percent = metrics["apr_percent"]
 
                 docs.append(
                     {
@@ -517,32 +558,9 @@ async def refresh_grouped_by_token() -> Dict[str, Dict[str, Any]]:
         backpack_markets = []
         print(f"Error al leer Backpack: {e}")
 
-    for snap in backpack_markets:
-        token = canonical_symbol_from_snapshot(snap)
-        if not token:
-            continue
-
-        exchange_name = "Backpack"
-
-        price = (
-            snap.get("mark_price")
-            or snap.get("index_price")
-            or snap.get("oracle_price")
-        )
-
-        payload = {
-            "exchange": exchange_name,
-            "symbol": snap.get("symbol"),
-            "funding_rate": snap.get("funding_rate"),
-            "timestamp": snap.get("timestamp"),
-            "open_interest": snap.get("open_interest"),
-            "volume_24h": snap.get("volume_24h"),
-            "price": price,
-        }
-
-        if token not in grouped:
-            grouped[token] = {}
-        grouped[token][exchange_name] = payload
+    backpack_grouped = _group_markets_by_token("Backpack", backpack_markets)
+    for token, payloads in backpack_grouped.items():
+        grouped.setdefault(token, {}).update(payloads)
 
     # -------- Hyperliquid --------
     try:
@@ -551,32 +569,9 @@ async def refresh_grouped_by_token() -> Dict[str, Dict[str, Any]]:
         hyper_markets = []
         print(f"Error al leer Hyperliquid: {e}")
 
-    for snap in hyper_markets:
-        token = canonical_symbol_from_snapshot(snap)
-        if not token:
-            continue
-
-        exchange_name = "Hyperliquid"
-
-        price = (
-            snap.get("mark_price")
-            or snap.get("index_price")
-            or snap.get("oracle_price")
-        )
-
-        payload = {
-            "exchange": exchange_name,
-            "symbol": snap.get("symbol"),
-            "funding_rate": snap.get("funding_rate"),
-            "timestamp": snap.get("timestamp"),
-            "open_interest": snap.get("open_interest"),
-            "volume_24h": snap.get("volume_24h"),
-            "price": price,
-        }
-
-        if token not in grouped:
-            grouped[token] = {}
-        grouped[token][exchange_name] = payload
+    hyper_grouped = _group_markets_by_token("Hyperliquid", hyper_markets)
+    for token, payloads in hyper_grouped.items():
+        grouped.setdefault(token, {}).update(payloads)
 
     return grouped
 
