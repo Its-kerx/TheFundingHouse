@@ -23,7 +23,7 @@ function renderSidebar() {
     </nav>
 
     <div class="p-4 border-t border-white/5 mt-auto">
-        <button class="w-full bg-[#1e1b4b] hover:bg-[#2d2a6e] text-indigo-100 py-3 rounded-xl font-medium flex items-center justify-center gap-2 border border-indigo-500/30 transition-colors">
+        <button id="connect-wallet-btn" class="w-full bg-[#1e1b4b] hover:bg-[#2d2a6e] text-indigo-100 py-3 rounded-xl font-medium flex items-center justify-center gap-2 border border-indigo-500/30 transition-colors">
             <i data-lucide="wallet" class="w-5 h-5"></i>
             Connect Wallet
         </button>
@@ -47,8 +47,24 @@ let filtersState = {
     volMax: null,
 };
 let searchTerm = "";
+let walletState = { address: null, provider: null };
+let walletListenersAttached = false;
+let walletMenuListenersAttached = false;
+const API_BASE = window.__TFH_API_BASE || "http://localhost:3000";
+const TFH_PROFILE_URL = window.__TFH_PROFILE_URL || "/profile.html";
+let __tfhInitDone = false;
+
+function safeJsonParse(str) {
+    try {
+        return JSON.parse(str);
+    } catch (err) {
+        console.warn("Invalid tfh_wallet, clearing.");
+        return null;
+    }
+}
 
 function initUIInteractions() {
+    if (__tfhInitDone) return;
     // A. Dropdown de Plataformas
     const btn = document.getElementById("platforms-btn");
     const dropdown = document.getElementById("platforms-dropdown");
@@ -161,10 +177,46 @@ function initUIInteractions() {
             recomputeAndRender();
         });
     }
+
+    // E. Connect Wallet modal
+    injectWalletModal();
+    injectWalletMenu();
+    const connectBtn = document.getElementById("connect-wallet-btn");
+    if (!connectBtn) {
+        console.warn("connect-wallet-btn not found yet, will rely on delegation.");
+    }
+    // Delegated click handler
+    document.addEventListener("click", async (e) => {
+        const btnEl = e.target.closest("#connect-wallet-btn");
+        if (!btnEl) return;
+        e.preventDefault();
+        await openAccountMenuOrConnectModal();
+    });
+    window.__tfhWallet = walletState;
+    attachWalletListenersOnce();
+    attachWalletMenuListenersOnce();
+    __tfhInitDone = true;
 }
 
 // --- 3. Datos y Tablas ---
 function initDashboard() {
+    // cargar estado almacenado
+    try {
+        const stored = localStorage.getItem("tfh_wallet");
+        if (stored) {
+            const parsed = safeJsonParse(stored);
+            if (parsed && parsed.address) {
+                walletState = { address: parsed.address, provider: parsed.provider || null, chainId: parsed.chainId ?? null };
+                window.__tfhWallet = walletState;
+                updateConnectButton();
+            } else if (parsed === null) {
+                localStorage.removeItem("tfh_wallet");
+            }
+        }
+    } catch (e) {
+        console.warn("Invalid tfh_wallet, clearing.");
+        localStorage.removeItem("tfh_wallet");
+    }
     loadFunding("live");
 }
 
@@ -173,6 +225,15 @@ async function loadFunding(timeframe) {
         document.querySelector("[data-funding-table-body]") ||
         document.getElementById("funding-table-body");
     if (!tableBody) return;
+
+    // Si no es live, mostrar no disponible y no llamar backend
+    if (timeframe !== "live") {
+        tableBody.innerHTML =
+            '<tr><td colspan="8" class="text-center py-10 text-slate-400">Temporalidad no disponible por el momento</td></tr>';
+        allRows = [];
+        filteredRows = [];
+        return;
+    }
 
     tableBody.innerHTML =
         '<tr><td colspan="8" class="text-center py-10 text-slate-400">Loading...</td></tr>';
@@ -524,4 +585,358 @@ function resetFilters() {
         inp.value = "";
     });
     recomputeAndRender();
+}
+
+// --- 5. Wallet modal / connect logic ---
+function injectWalletModal() {
+    if (document.getElementById("wallet-modal-backdrop")) return;
+    const style = document.createElement("style");
+    style.textContent = `
+    .wallet-backdrop {
+        position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: none; align-items: center; justify-content: center; z-index: 9999;
+    }
+    .wallet-modal {
+        background: #111227; color: #fff; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; width: 320px; padding: 20px; box-shadow: 0 10px 40px rgba(0,0,0,0.35);
+    }
+    .wallet-modal h3 { margin: 0 0 12px 0; font-size: 18px; }
+    .wallet-btn {
+        width: 100%; padding: 10px 14px; margin-bottom: 10px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1); background: #1c1f3a; color: #fff; cursor: pointer; font-weight: 600;
+        display: flex; align-items: center; justify-content: space-between;
+    }
+    .wallet-btn:hover { background: #24284c; }
+    .wallet-btn.disabled { opacity: 0.5; cursor: not-allowed; }
+    .wallet-secondary { background: transparent; border: 1px solid rgba(255,255,255,0.15); }
+    .wallet-close {
+        position: absolute; top: 12px; right: 12px; cursor: pointer; color: #8a8fad; font-size: 16px;
+    }
+    .wallet-note { font-size: 12px; color: #9ba3c1; margin-top: 8px; }
+    `;
+    document.head.appendChild(style);
+
+    const backdrop = document.createElement("div");
+    backdrop.id = "wallet-modal-backdrop";
+    backdrop.className = "wallet-backdrop";
+    backdrop.innerHTML = `
+        <div class="wallet-modal" role="dialog">
+            <div class="wallet-close" id="wallet-modal-close">✕</div>
+            <h3>Connect Wallet</h3>
+            <button id="wallet-metamask" class="wallet-btn">MetaMask <span class="label"></span></button>
+            <button id="wallet-rabby" class="wallet-btn">Rabby <span class="label"></span></button>
+            <button id="wallet-cancel" class="wallet-btn wallet-secondary">Cancel</button>
+            <div id="wallet-msg" class="wallet-note"></div>
+        </div>
+    `;
+    document.body.appendChild(backdrop);
+
+    backdrop.addEventListener("click", (e) => {
+        if (e.target === backdrop) closeWalletModal();
+    });
+    const closeBtn = document.getElementById("wallet-modal-close");
+    if (closeBtn) closeBtn.addEventListener("click", closeWalletModal);
+    document.getElementById("wallet-cancel")?.addEventListener("click", closeWalletModal);
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeWalletModal();
+    });
+
+    const mmBtn = document.getElementById("wallet-metamask");
+    const rbBtn = document.getElementById("wallet-rabby");
+    if (mmBtn) mmBtn.addEventListener("click", () => connectWallet("metamask"));
+    if (rbBtn) rbBtn.addEventListener("click", () => connectWallet("rabby"));
+}
+
+function openWalletModal() {
+    const backdrop = document.getElementById("wallet-modal-backdrop");
+    if (!backdrop) return;
+    const msg = document.getElementById("wallet-msg");
+    const mmBtn = document.getElementById("wallet-metamask");
+    const rbBtn = document.getElementById("wallet-rabby");
+    const hasEth = typeof window !== "undefined" && window.ethereum;
+    const hasMM = hasEth && window.ethereum.isMetaMask;
+    const hasRabby = hasEth && window.ethereum.isRabby;
+
+    const setBtn = (btn, available, label) => {
+        if (!btn) return;
+        btn.classList.toggle("disabled", !available);
+        btn.disabled = !available;
+        const span = btn.querySelector(".label");
+        if (span) span.textContent = available ? "" : "Not installed";
+        btn.setAttribute("title", label);
+    };
+    setBtn(mmBtn, !!hasMM, "MetaMask");
+    setBtn(rbBtn, !!hasRabby, "Rabby");
+
+    if (!hasEth) {
+        if (msg) msg.textContent = "No wallet detected. Install MetaMask or Rabby.";
+    } else {
+        if (msg) msg.textContent = "";
+    }
+
+    backdrop.style.display = "flex";
+}
+
+function closeWalletModal() {
+    const backdrop = document.getElementById("wallet-modal-backdrop");
+    if (backdrop) backdrop.style.display = "none";
+}
+
+function shortAddress(addr) {
+    if (!addr || addr.length < 10) return addr || "";
+    return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
+
+function updateConnectButton() {
+    const btn = document.getElementById("connect-wallet-btn");
+    if (!btn) return;
+    if (walletState.address) {
+        btn.textContent = shortAddress(walletState.address);
+    } else {
+        btn.textContent = "Connect Wallet";
+    }
+}
+
+async function connectWallet(providerName) {
+    const eth = typeof window !== "undefined" ? window.ethereum : null;
+    if (!eth) {
+        closeWalletModal();
+        return;
+    }
+    if (providerName === "metamask" && !eth.isMetaMask) {
+        closeWalletModal();
+        return;
+    }
+    if (providerName === "rabby" && !eth.isRabby) {
+        closeWalletModal();
+        return;
+    }
+    try {
+        const accounts = await eth.request({ method: "eth_requestAccounts" });
+        const addr = accounts && accounts[0];
+        const chainHex = await eth.request({ method: "eth_chainId" });
+        const chainId = parseInt(chainHex, 16);
+        if (addr) {
+            walletState = { address: addr, provider: providerName, chainId };
+            window.__tfhWallet = walletState;
+            updateConnectButton();
+            // persist wallet
+            try {
+                localStorage.setItem("tfh_wallet", JSON.stringify({ address: addr, provider: providerName, chainId }));
+            } catch (e) { /* ignore */ }
+            await siweLogin(addr, chainId);
+        }
+    } catch (err) {
+        // ignore user rejection (4001)
+        console.error("wallet connect error", err);
+    } finally {
+        closeWalletModal();
+        closeWalletMenu();
+    }
+}
+
+function attachWalletListenersOnce() {
+    const eth = typeof window !== "undefined" ? window.ethereum : null;
+    if (!eth || walletListenersAttached) return;
+    eth.on("accountsChanged", (accounts) => {
+        const addr = accounts && accounts[0];
+        if (!addr) {
+            walletState = { address: null, provider: null };
+        } else {
+            walletState.address = addr;
+        }
+        window.__tfhWallet = walletState;
+        try {
+            if (walletState.address) {
+                localStorage.setItem("tfh_wallet", JSON.stringify({ address: walletState.address, provider: walletState.provider || null, chainId: null }));
+            } else {
+                localStorage.removeItem("tfh_wallet");
+                localStorage.removeItem("tfh_jwt");
+            }
+        } catch (e) { /* ignore */ }
+        updateConnectButton();
+    });
+    eth.on("chainChanged", () => {
+        window.location.reload();
+    });
+    walletListenersAttached = true;
+}
+
+function isConnected() {
+    return !!(walletState && walletState.address);
+}
+
+function getJwtToken() {
+    try {
+        return localStorage.getItem("tfh_jwt");
+    } catch (e) {
+        return null;
+    }
+}
+
+function injectWalletMenu() {
+    if (document.getElementById("wallet-menu")) return;
+    const style = document.createElement("style");
+    style.textContent = `
+    .wallet-menu {
+        position: absolute;
+        min-width: 200px;
+        background: #111227;
+        color: #e5e7f3;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 10px;
+        padding: 6px 0;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+        z-index: 9999;
+        display: none;
+    }
+    .wallet-menu .item {
+        padding: 10px 14px;
+        cursor: pointer;
+        font-size: 14px;
+    }
+    .wallet-menu .item:hover {
+        background: rgba(255,255,255,0.05);
+    }
+    .wallet-menu .divider {
+        height: 1px;
+        background: rgba(255,255,255,0.08);
+        margin: 4px 0;
+    }
+    .wallet-menu .danger { color: #f87171; }
+    `;
+    document.head.appendChild(style);
+
+    const menu = document.createElement("div");
+    menu.id = "wallet-menu";
+    menu.className = "wallet-menu";
+    menu.innerHTML = `
+        <div id="wallet-menu-profile" class="item">My profile</div>
+        <div class="divider"></div>
+        <div id="wallet-menu-disconnect" class="item danger">Disconnect</div>
+    `;
+    document.body.appendChild(menu);
+
+    document.getElementById("wallet-menu-profile")?.addEventListener("click", () => {
+        window.location.href = TFH_PROFILE_URL;
+        closeWalletMenu();
+    });
+    document.getElementById("wallet-menu-disconnect")?.addEventListener("click", () => {
+        disconnectWallet();
+    });
+}
+
+function openWalletMenu() {
+    const menu = document.getElementById("wallet-menu");
+    const btn = document.getElementById("connect-wallet-btn");
+    if (!menu || !btn) return;
+    const rect = btn.getBoundingClientRect();
+    menu.style.display = "block";
+    menu.style.top = `${rect.bottom + window.scrollY + 8}px`;
+    menu.style.left = `${rect.left + window.scrollX}px`;
+}
+
+function closeWalletMenu() {
+    const menu = document.getElementById("wallet-menu");
+    if (menu) menu.style.display = "none";
+}
+
+function disconnectWallet() {
+    walletState = { address: null, provider: null };
+    window.__tfhWallet = walletState;
+    try {
+        localStorage.removeItem("tfh_jwt");
+        localStorage.removeItem("tfh_wallet");
+    } catch (e) {
+        // ignore
+    }
+    updateConnectButton();
+    closeWalletMenu();
+}
+
+function attachWalletMenuListenersOnce() {
+    if (walletMenuListenersAttached) return;
+    document.addEventListener("click", (e) => {
+        const menu = document.getElementById("wallet-menu");
+        const btn = document.getElementById("connect-wallet-btn");
+        if (!menu || !btn) return;
+        if (menu.style.display !== "block") return;
+        if (!menu.contains(e.target) && !btn.contains(e.target)) {
+            closeWalletMenu();
+        }
+    });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeWalletMenu();
+    });
+    walletMenuListenersAttached = true;
+}
+
+async function openAccountMenuOrConnectModal() {
+    const hasToken = getJwtToken() != null;
+    if (isConnected()) {
+        if (!hasToken) {
+            const eth = typeof window !== "undefined" ? window.ethereum : null;
+            if (!eth) {
+                openWalletModal();
+                return;
+            }
+            try {
+                const chainHex = await eth.request({ method: "eth_chainId" });
+                const chainId = parseInt(chainHex, 16);
+                await siweLogin(walletState.address, chainId);
+            } catch (err) {
+                console.error("Unable to re-login SIWE", err);
+                openWalletModal();
+                return;
+            }
+        }
+        openWalletMenu();
+    } else {
+        openWalletModal();
+    }
+}
+async function siweLogin(address, chainId) {
+    const eth = typeof window !== "undefined" ? window.ethereum : null;
+    const msgBox = document.getElementById("wallet-msg");
+    if (!eth) {
+        if (msgBox) msgBox.textContent = "No wallet detected.";
+        return;
+    }
+    try {
+        const nonceResp = await fetch(`${API_BASE}/auth/nonce`);
+        if (!nonceResp.ok) throw new Error("Failed to get nonce");
+        const nonceData = await nonceResp.json();
+        const nonce = nonceData.nonce;
+        // Use hostname (no port) to satisfy gateway allowlist (ALLOWED_SIWE_DOMAINS defaults to "localhost")
+        const domain = window.location.hostname;
+        const uri = window.location.origin;
+        const issuedAt = new Date().toISOString();
+        const statement = "Sign in to TheFundingHouse.";
+        const message = `${domain} wants you to sign in with your Ethereum account:\n${address}\n\n${statement}\n\nURI: ${uri}\nVersion: 1\nChain ID: ${chainId}\nNonce: ${nonce}\nIssued At: ${issuedAt}`;
+        const signature = await eth.request({
+            method: "personal_sign",
+            params: [message, address],
+        });
+        const verifyResp = await fetch(`${API_BASE}/auth/verify`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message, signature }),
+        });
+        if (!verifyResp.ok) {
+            if (msgBox) msgBox.textContent = "Login failed. Please try again.";
+            return;
+        }
+        const verifyData = await verifyResp.json();
+        const token = verifyData.access_token;
+        if (token) {
+            localStorage.setItem("tfh_jwt", token);
+            localStorage.setItem("tfh_wallet", JSON.stringify({ address, chainId, provider: walletState.provider || null }));
+        }
+        if (msgBox) msgBox.textContent = "";
+    } catch (err) {
+        if (err && err.code === 4001) {
+            // user rejected signature
+            if (msgBox) msgBox.textContent = "Login canceled.";
+            return;
+        }
+        console.error("SIWE login error", err);
+        if (msgBox) msgBox.textContent = "Login failed. Please try again.";
+    }
 }
