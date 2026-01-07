@@ -41,7 +41,11 @@ LOGO_TTL_SECONDS = 7 * 24 * 3600
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-please-change")
 JWT_ALGO = "HS256"
 
-ALLOWED_SIWE_DOMAINS = [d.strip() for d in os.getenv("ALLOWED_SIWE_DOMAINS", "localhost").split(",") if d.strip()]
+ALLOWED_SIWE_DOMAINS = [
+    d.strip()
+    for d in os.getenv("ALLOWED_SIWE_DOMAINS", "localhost,127.0.0.1").split(",")
+    if d.strip()
+]
 ALLOWED_SIWE_URIS = [u.strip() for u in os.getenv("ALLOWED_SIWE_URIS", "").split(",") if u.strip()]
 ALLOWED_CHAIN_IDS = {int(x) for x in os.getenv("ALLOWED_CHAIN_IDS", "1,137").split(",") if x.strip().isdigit()}
 PORTFOLIO_PROVIDER = os.getenv("PORTFOLIO_PROVIDER", "covalent").lower()
@@ -156,8 +160,9 @@ async def auth_verify(body: Dict[str, Any]):
         raise HTTPException(400, f"Invalid SIWE message: {exc}")
 
     # domain / uri / chain checks
-    if siwe_msg.domain not in ALLOWED_SIWE_DOMAINS:
-        raise HTTPException(400, "Domain not allowed")
+    if ALLOWED_SIWE_DOMAINS and "*" not in ALLOWED_SIWE_DOMAINS:
+        if siwe_msg.domain not in ALLOWED_SIWE_DOMAINS:
+            raise HTTPException(400, "Domain not allowed")
     if ALLOWED_SIWE_URIS and siwe_msg.uri not in ALLOWED_SIWE_URIS:
         raise HTTPException(400, "URI not allowed")
     if ALLOWED_CHAIN_IDS and siwe_msg.chain_id not in ALLOWED_CHAIN_IDS:

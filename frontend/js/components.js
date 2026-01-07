@@ -721,14 +721,15 @@ async function connectWallet(providerName) {
             try {
                 localStorage.setItem("tfh_wallet", JSON.stringify({ address: addr, provider: providerName, chainId }));
             } catch (e) { /* ignore */ }
-            await siweLogin(addr, chainId);
+            const ok = await siweLogin(addr, chainId);
+            if (ok) {
+                closeWalletModal();
+                closeWalletMenu();
+            }
         }
     } catch (err) {
         // ignore user rejection (4001)
         console.error("wallet connect error", err);
-    } finally {
-        closeWalletModal();
-        closeWalletMenu();
     }
 }
 
@@ -772,11 +773,19 @@ function getJwtToken() {
 }
 
 function injectWalletMenu() {
-    if (document.getElementById("wallet-menu")) return;
+    if (document.getElementById("wallet-menu-backdrop")) return;
     const style = document.createElement("style");
     style.textContent = `
+    .wallet-menu-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.55);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+    }
     .wallet-menu {
-        position: absolute;
         min-width: 200px;
         background: #111227;
         color: #e5e7f3;
@@ -784,8 +793,6 @@ function injectWalletMenu() {
         border-radius: 10px;
         padding: 6px 0;
         box-shadow: 0 10px 30px rgba(0,0,0,0.35);
-        z-index: 9999;
-        display: none;
     }
     .wallet-menu .item {
         padding: 10px 14px;
@@ -804,15 +811,17 @@ function injectWalletMenu() {
     `;
     document.head.appendChild(style);
 
-    const menu = document.createElement("div");
-    menu.id = "wallet-menu";
-    menu.className = "wallet-menu";
-    menu.innerHTML = `
-        <div id="wallet-menu-profile" class="item">My profile</div>
-        <div class="divider"></div>
-        <div id="wallet-menu-disconnect" class="item danger">Disconnect</div>
+    const backdrop = document.createElement("div");
+    backdrop.id = "wallet-menu-backdrop";
+    backdrop.className = "wallet-menu-backdrop";
+    backdrop.innerHTML = `
+        <div id="wallet-menu" class="wallet-menu">
+            <div id="wallet-menu-profile" class="item">My profile</div>
+            <div class="divider"></div>
+            <div id="wallet-menu-disconnect" class="item danger">Disconnect</div>
+        </div>
     `;
-    document.body.appendChild(menu);
+    document.body.appendChild(backdrop);
 
     document.getElementById("wallet-menu-profile")?.addEventListener("click", () => {
         window.location.href = TFH_PROFILE_URL;
@@ -821,21 +830,20 @@ function injectWalletMenu() {
     document.getElementById("wallet-menu-disconnect")?.addEventListener("click", () => {
         disconnectWallet();
     });
+    backdrop.addEventListener("click", (e) => {
+        if (e.target === backdrop) closeWalletMenu();
+    });
 }
 
 function openWalletMenu() {
-    const menu = document.getElementById("wallet-menu");
-    const btn = document.getElementById("connect-wallet-btn");
-    if (!menu || !btn) return;
-    const rect = btn.getBoundingClientRect();
-    menu.style.display = "block";
-    menu.style.top = `${rect.bottom + window.scrollY + 8}px`;
-    menu.style.left = `${rect.left + window.scrollX}px`;
+    const backdrop = document.getElementById("wallet-menu-backdrop");
+    if (!backdrop) return;
+    backdrop.style.display = "flex";
 }
 
 function closeWalletMenu() {
-    const menu = document.getElementById("wallet-menu");
-    if (menu) menu.style.display = "none";
+    const backdrop = document.getElementById("wallet-menu-backdrop");
+    if (backdrop) backdrop.style.display = "none";
 }
 
 function disconnectWallet() {
@@ -880,7 +888,11 @@ async function openAccountMenuOrConnectModal() {
             try {
                 const chainHex = await eth.request({ method: "eth_chainId" });
                 const chainId = parseInt(chainHex, 16);
-                await siweLogin(walletState.address, chainId);
+                const ok = await siweLogin(walletState.address, chainId);
+                if (!ok) {
+                    openWalletModal();
+                    return;
+                }
             } catch (err) {
                 console.error("Unable to re-login SIWE", err);
                 openWalletModal();
@@ -897,7 +909,7 @@ async function siweLogin(address, chainId) {
     const msgBox = document.getElementById("wallet-msg");
     if (!eth) {
         if (msgBox) msgBox.textContent = "No wallet detected.";
-        return;
+        return false;
     }
     try {
         const nonceResp = await fetch(`${API_BASE}/auth/nonce`);
@@ -921,7 +933,7 @@ async function siweLogin(address, chainId) {
         });
         if (!verifyResp.ok) {
             if (msgBox) msgBox.textContent = "Login failed. Please try again.";
-            return;
+            return false;
         }
         const verifyData = await verifyResp.json();
         const token = verifyData.access_token;
@@ -930,13 +942,15 @@ async function siweLogin(address, chainId) {
             localStorage.setItem("tfh_wallet", JSON.stringify({ address, chainId, provider: walletState.provider || null }));
         }
         if (msgBox) msgBox.textContent = "";
+        return true;
     } catch (err) {
         if (err && err.code === 4001) {
             // user rejected signature
             if (msgBox) msgBox.textContent = "Login canceled.";
-            return;
+            return false;
         }
         console.error("SIWE login error", err);
         if (msgBox) msgBox.textContent = "Login failed. Please try again.";
+        return false;
     }
 }
