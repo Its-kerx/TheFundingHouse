@@ -18,6 +18,8 @@ def _env_float(primary: str, default_val: str, legacy: str | None = None) -> flo
 
 BACKPACK_DEFAULT = "http://data_ingestion:8001"
 BACKPACK_BASE_URL = _env("BACKPACK_BASE_URL", BACKPACK_DEFAULT)
+DEX_EXTENDED_BASE_URL = _env("DEX_EXTENDED_BASE_URL", BACKPACK_DEFAULT)
+PACIFICA_BASE_URL = _env("PACIFICA_BASE_URL", BACKPACK_DEFAULT)
 HYPERLIQUID_BASE_URL = _env("HYPERLIQUID_BASE_URL", "http://localhost:8001")
 FUNDING_ANALYTICS_BASE_URL = _env("FUNDING_ANALYTICS_BASE_URL", "http://localhost:8002")
 
@@ -48,9 +50,11 @@ def _run_loop() -> None:
 
         if now >= next_markets:
             bp_url = f"{BACKPACK_BASE_URL}/backpack/refresh"
-            log(f"Refreshing markets (Backpack + Hyperliquid) | backpack_url={bp_url}")
+            log(f"Refreshing markets (Backpack + Hyperliquid + DexExtended + Pacifica) | backpack_url={bp_url}")
             _safe_post(bp_url)
             _safe_post(f"{HYPERLIQUID_BASE_URL}/hyperliquid/refresh")
+            _safe_post(f"{DEX_EXTENDED_BASE_URL}/dex-extended/refresh")
+            _safe_post(f"{PACIFICA_BASE_URL}/pacifica/refresh")
             next_markets = now + MARKETS_EVERY_SECONDS
 
         if now >= next_snapshot:

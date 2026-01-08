@@ -5,8 +5,9 @@ Helpers to fetch and normalize funding history into 8h buckets.
 """
 
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
 
@@ -21,6 +22,12 @@ except Exception:
 
 BASE_INTERVAL_HOURS = 8.0
 BASE_INTERVAL = timedelta(hours=BASE_INTERVAL_HOURS)
+
+DEX_EXTENDED_BASE_URL = os.getenv(
+    "DEX_EXTENDED_BASE_URL",
+    "https://api.starknet.extended.exchange",
+)
+PACIFICA_BASE_URL = os.getenv("PACIFICA_BASE_URL", "https://api.pacifica.fi/api/v1")
 
 
 async def _fetch_backpack_funding_history_for_symbol(
@@ -60,6 +67,131 @@ async def _fetch_backpack_funding_history_for_symbol(
                 "timestamp": ts,
                 "funding_rate": float(rate_str),
                 "interval_hours": 1.0,
+            }
+        )
+    return events
+
+
+def _parse_ts(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        if isinstance(value, (int, float)):
+            ts_num = float(value)
+            if ts_num > 1e12:
+                return datetime.fromtimestamp(ts_num / 1000.0, tz=timezone.utc)
+            return datetime.fromtimestamp(ts_num, tz=timezone.utc)
+        if isinstance(value, str):
+            ts_str = value.strip()
+            if ts_str.endswith("Z"):
+                ts_str = ts_str.replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(ts_str)
+                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                pass
+    except Exception:
+        return None
+    return None
+
+
+async def _fetch_dex_extended_funding_history_for_symbol(
+    symbol: str,
+    from_ts: datetime,
+    to_ts: datetime,
+    client: httpx.AsyncClient,
+) -> List[Dict[str, Any]]:
+    start_ms = int(from_ts.replace(tzinfo=timezone.utc).timestamp() * 1000)
+    end_ms = int(to_ts.replace(tzinfo=timezone.utc).timestamp() * 1000)
+    resp = await client.get(
+        f"{DEX_EXTENDED_BASE_URL}/api/v1/info/{symbol}/funding",
+        params={"startTime": start_ms, "endTime": end_ms},
+    )
+    resp.raise_for_status()
+    data = resp.json() or {}
+    events: List[Dict[str, Any]] = []
+    items = data.get("data") if isinstance(data, dict) else data
+    if isinstance(items, dict):
+        items = items.get("items") or items.get("history") or items.get("data")
+    if not isinstance(items, list):
+        return events
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ts = _parse_ts(item.get("timestamp") or item.get("time") or item.get("t"))
+        if ts is None:
+            continue
+        if ts < from_ts or ts > to_ts:
+            continue
+        rate_val = (
+            item.get("fundingRate")
+            or item.get("funding_rate")
+            or item.get("funding")
+            or item.get("rate")
+        )
+        interval = (
+            item.get("interval_hours")
+            or item.get("intervalHours")
+            or item.get("interval")
+            or 1.0
+        )
+        events.append(
+            {
+                "timestamp": ts,
+                "funding_rate": float(rate_val or 0.0),
+                "interval_hours": float(interval or 1.0),
+                "raw": item,
+            }
+        )
+    return events
+
+
+async def _fetch_pacifica_funding_history_for_symbol(
+    symbol: str,
+    from_ts: datetime,
+    to_ts: datetime,
+    client: httpx.AsyncClient,
+) -> List[Dict[str, Any]]:
+    resp = await client.get(
+        f"{PACIFICA_BASE_URL}/funding_rate/history",
+        params={"symbol": symbol, "limit": 1000},
+    )
+    resp.raise_for_status()
+    data = resp.json() or {}
+    items = data.get("data") if isinstance(data, dict) else data
+    if isinstance(items, dict):
+        items = items.get("items") or items.get("history") or items.get("list")
+    events: List[Dict[str, Any]] = []
+    if not isinstance(items, list):
+        return events
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ts = _parse_ts(item.get("timestamp") or item.get("time") or item.get("t"))
+        if ts is None:
+            continue
+        if ts < from_ts or ts > to_ts:
+            continue
+        rate_val = (
+            item.get("fundingRate")
+            or item.get("funding_rate")
+            or item.get("rate")
+            or item.get("r")
+        )
+        interval = (
+            item.get("interval_hours")
+            or item.get("intervalHours")
+            or item.get("interval")
+            or 1.0
+        )
+        events.append(
+            {
+                "timestamp": ts,
+                "funding_rate": float(rate_val or 0.0),
+                "interval_hours": float(interval or 1.0),
+                "raw": item,
             }
         )
     return events
@@ -119,6 +251,24 @@ async def fetch_raw_funding_history(
     if ex == "backpack":
         async with httpx.AsyncClient(timeout=10.0) as client:
             return await _fetch_backpack_funding_history_for_symbol(
+                symbol=symbol,
+                from_ts=from_ts,
+                to_ts=to_ts,
+                client=client,
+            )
+
+    if ex in {"dexextended", "dex-extended", "dex_extended", "extended"}:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await _fetch_dex_extended_funding_history_for_symbol(
+                symbol=symbol,
+                from_ts=from_ts,
+                to_ts=to_ts,
+                client=client,
+            )
+
+    if ex == "pacifica":
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await _fetch_pacifica_funding_history_for_symbol(
                 symbol=symbol,
                 from_ts=from_ts,
                 to_ts=to_ts,

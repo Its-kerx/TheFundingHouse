@@ -9,6 +9,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from adapters.backpack import BackpackAdapter
 from adapters.hyperliquid import HyperliquidAdapter
+from adapters.dex_extended import DexExtendedAdapter
+from adapters.pacifica import PacificaAdapter
 from funding_history import (
     BASE_INTERVAL_HOURS,
     aggregate_to_8h,
@@ -32,16 +34,22 @@ MONGO_DB = os.getenv("MONGO_DB", "tfh")
 
 COL_HYPER_CURRENT = "funding_hyperliquid_current"
 COL_BACKPACK_CURRENT = "funding_backpack_current"
+COL_DEX_EXTENDED_CURRENT = "funding_dex_extended_current"
+COL_PACIFICA_CURRENT = "funding_pacifica_current"
 COL_FUNDING_TS = "funding_timeseries"
 
 mongo_client: Optional[AsyncIOMotorClient] = None
 db = None
 hyper_current_col = None
 backpack_current_col = None
+dex_extended_current_col = None
+pacifica_current_col = None
 funding_ts_col = None
 
 hyper_adapter = HyperliquidAdapter()
 backpack_adapter = BackpackAdapter()
+dex_extended_adapter = DexExtendedAdapter()
+pacifica_adapter = PacificaAdapter()
 
 FUNDING_INTERVAL_HOURS_DEFAULT = 1.0
 
@@ -215,13 +223,26 @@ async def _list_symbols_for_exchange(exchange_name: str) -> List[str]:
         elif exchange == "hyperliquid":
             markets = await hyper_adapter.get_markets()
             symbols = [m.get("symbol") for m in markets if m.get("symbol")]
+        elif exchange in {"dexextended", "dex-extended", "dex_extended", "extended"}:
+            markets = await dex_extended_adapter.get_markets()
+            symbols = [m.get("symbol") for m in markets if m.get("symbol")]
+        elif exchange == "pacifica":
+            markets = await pacifica_adapter.get_markets()
+            symbols = [m.get("symbol") for m in markets if m.get("symbol")]
     except Exception:
         symbols = []
 
     # Fallback a colecciones *_current si no hay markets
     if not symbols:
         try:
-            col = backpack_current_col if exchange == "backpack" else hyper_current_col
+            if exchange == "backpack":
+                col = backpack_current_col
+            elif exchange == "hyperliquid":
+                col = hyper_current_col
+            elif exchange in {"dexextended", "dex-extended", "dex_extended", "extended"}:
+                col = dex_extended_current_col
+            else:
+                col = pacifica_current_col
             if col is not None:
                 symbols = await col.distinct("symbol")
         except Exception:
@@ -252,6 +273,8 @@ async def _bootstrap_funding_history_internal(days: int = 30) -> Dict[str, Any]:
     exchanges = [
         ("Hyperliquid", hyper_adapter, hyper_current_col),
         ("Backpack", backpack_adapter, backpack_current_col),
+        ("DexExtended", dex_extended_adapter, dex_extended_current_col),
+        ("Pacifica", pacifica_adapter, pacifica_current_col),
     ]
 
     for exchange_name, _adapter, _col in exchanges:
@@ -370,6 +393,18 @@ async def _funding_hourly_refresh_internal() -> Dict[str, Any]:
     except Exception as e:
         results.append({"exchange": "Hyperliquid", "error": str(e)})
 
+    try:
+        res_dx = await refresh_dex_extended()
+        results.append({"exchange": "DexExtended", **res_dx})
+    except Exception as e:
+        results.append({"exchange": "DexExtended", "error": str(e)})
+
+    try:
+        res_pc = await refresh_pacifica()
+        results.append({"exchange": "Pacifica", **res_pc})
+    except Exception as e:
+        results.append({"exchange": "Pacifica", "error": str(e)})
+
     return {
         "status": "ok",
         "run_at": now_utc().isoformat(),
@@ -395,13 +430,15 @@ async def _hourly_loop_task():
 
 @app.on_event("startup")
 async def startup_event():
-    global mongo_client, db, hyper_current_col, backpack_current_col, funding_ts_col
+    global mongo_client, db, hyper_current_col, backpack_current_col, dex_extended_current_col, pacifica_current_col, funding_ts_col
 
     mongo_client = AsyncIOMotorClient(MONGO_URI)
     db = mongo_client[MONGO_DB]
 
     hyper_current_col = db[COL_HYPER_CURRENT]
     backpack_current_col = db[COL_BACKPACK_CURRENT]
+    dex_extended_current_col = db[COL_DEX_EXTENDED_CURRENT]
+    pacifica_current_col = db[COL_PACIFICA_CURRENT]
     funding_ts_col = db[COL_FUNDING_TS]
 
     # Índices básicos para histórico
@@ -516,6 +553,67 @@ async def refresh_hyperliquid():
         "successful": ok,
     }
 
+@app.post("/dex-extended/refresh", response_model=dict)
+async def refresh_dex_extended():
+    """
+    Refresca TODOS los mercados perp de DEX Extended y guarda:
+      - funding_dex_extended_current
+      - funding_timeseries
+    """
+    if dex_extended_current_col is None:
+        raise HTTPException(500, "Mongo not initialized")
+
+    try:
+        snapshots: List[Dict[str, Any]] = await dex_extended_adapter.get_all_market_data()
+    except Exception as e:
+        raise HTTPException(502, f"Error calling DEX Extended API: {e}")
+
+    ok = 0
+    for snap in snapshots:
+        try:
+            snap["exchange"] = "DexExtended"
+            await upsert_current_and_ts(dex_extended_current_col, snap)
+            ok += 1
+        except Exception:
+            continue
+
+    return {
+        "exchange": "DexExtended",
+        "markets_processed": len(snapshots),
+        "successful": ok,
+    }
+
+
+@app.post("/pacifica/refresh", response_model=dict)
+async def refresh_pacifica():
+    """
+    Refresca TODOS los mercados perp de Pacifica y guarda:
+      - funding_pacifica_current
+      - funding_timeseries
+    """
+    if pacifica_current_col is None:
+        raise HTTPException(500, "Mongo not initialized")
+
+    try:
+        snapshots: List[Dict[str, Any]] = await pacifica_adapter.get_all_market_data()
+    except Exception as e:
+        raise HTTPException(502, f"Error calling Pacifica API: {e}")
+
+    ok = 0
+    for snap in snapshots:
+        try:
+            snap["exchange"] = "Pacifica"
+            await upsert_current_and_ts(pacifica_current_col, snap)
+            ok += 1
+        except Exception:
+            continue
+
+    return {
+        "exchange": "Pacifica",
+        "markets_processed": len(snapshots),
+        "successful": ok,
+    }
+
 
 #############################
 @app.post("/refresh/grouped-by-token", response_model=dict)
@@ -571,6 +669,28 @@ async def refresh_grouped_by_token() -> Dict[str, Dict[str, Any]]:
 
     hyper_grouped = _group_markets_by_token("Hyperliquid", hyper_markets)
     for token, payloads in hyper_grouped.items():
+        grouped.setdefault(token, {}).update(payloads)
+
+    # -------- DEX Extended --------
+    try:
+        dex_markets: List[Dict[str, Any]] = await dex_extended_adapter.get_all_market_data()
+    except Exception as e:
+        dex_markets = []
+        print(f"Error al leer DEX Extended: {e}")
+
+    dex_grouped = _group_markets_by_token("DexExtended", dex_markets)
+    for token, payloads in dex_grouped.items():
+        grouped.setdefault(token, {}).update(payloads)
+
+    # -------- Pacifica --------
+    try:
+        pacifica_markets: List[Dict[str, Any]] = await pacifica_adapter.get_all_market_data()
+    except Exception as e:
+        pacifica_markets = []
+        print(f"Error al leer Pacifica: {e}")
+
+    pacifica_grouped = _group_markets_by_token("Pacifica", pacifica_markets)
+    for token, payloads in pacifica_grouped.items():
         grouped.setdefault(token, {}).update(payloads)
 
     return grouped
