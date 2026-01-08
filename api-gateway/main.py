@@ -47,7 +47,12 @@ ALLOWED_SIWE_DOMAINS = [
     if d.strip()
 ]
 ALLOWED_SIWE_URIS = [u.strip() for u in os.getenv("ALLOWED_SIWE_URIS", "").split(",") if u.strip()]
-ALLOWED_CHAIN_IDS = {int(x) for x in os.getenv("ALLOWED_CHAIN_IDS", "1,137").split(",") if x.strip().isdigit()}
+_raw_chain_ids = os.getenv("ALLOWED_CHAIN_IDS")
+ALLOWED_CHAIN_IDS = (
+    {int(x) for x in _raw_chain_ids.split(",") if x.strip().isdigit()}
+    if _raw_chain_ids is not None
+    else set()
+)
 PORTFOLIO_PROVIDER = os.getenv("PORTFOLIO_PROVIDER", "covalent").lower()
 COVALENT_API_KEY = os.getenv("COVALENT_API_KEY")
 
@@ -101,7 +106,7 @@ def _prune_nonces():
 
 def _generate_nonce() -> str:
     _prune_nonces()
-    nonce = secrets.token_urlsafe(16)
+    nonce = secrets.token_hex(16)
     NONCE_STORE[nonce] = datetime.now(timezone.utc) + NONCE_TTL
     return nonce
 

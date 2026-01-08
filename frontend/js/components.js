@@ -51,6 +51,7 @@ let walletState = { address: null, provider: null };
 let walletListenersAttached = false;
 let walletMenuListenersAttached = false;
 const API_BASE = window.__TFH_API_BASE || "http://localhost:3000";
+const SIWE_ENABLED = window.__TFH_SIWE_ENABLED ?? false;
 const TFH_PROFILE_URL = window.__TFH_PROFILE_URL || "/profile.html";
 let __tfhInitDone = false;
 
@@ -721,11 +722,16 @@ async function connectWallet(providerName) {
             try {
                 localStorage.setItem("tfh_wallet", JSON.stringify({ address: addr, provider: providerName, chainId }));
             } catch (e) { /* ignore */ }
-            const ok = await siweLogin(addr, chainId);
-            if (ok) {
-                closeWalletModal();
-                closeWalletMenu();
+            if (SIWE_ENABLED) {
+                const ok = await siweLogin(addr, chainId);
+                if (!ok) return;
+            } else {
+                try {
+                    localStorage.removeItem("tfh_jwt");
+                } catch (e) { /* ignore */ }
             }
+            closeWalletModal();
+            closeWalletMenu();
         }
     } catch (err) {
         // ignore user rejection (4001)
@@ -859,6 +865,36 @@ function disconnectWallet() {
     closeWalletMenu();
 }
 
+function buildSiweMessage({
+    domain,
+    address,
+    statement,
+    uri,
+    chainId,
+    nonce,
+    issuedAt,
+}) {
+    const cleanDomain = String(domain || "").trim();
+    const cleanAddress = String(address || "").trim();
+    const cleanStatement = String(statement || "").trim();
+    const cleanUri = String(uri || "").trim();
+    const cleanChainId = String(chainId || "").trim();
+    const cleanNonce = String(nonce || "").trim();
+    const cleanIssuedAt = String(issuedAt || "").trim();
+
+    const header = `${cleanDomain} wants you to sign in with your Ethereum account:`;
+    const statementBlock = cleanStatement ? `\n\n${cleanStatement}` : "";
+    return (
+        `${header}\n${cleanAddress}` +
+        `${statementBlock}` +
+        `\n\nURI: ${cleanUri}` +
+        `\nVersion: 1` +
+        `\nChain ID: ${cleanChainId}` +
+        `\nNonce: ${cleanNonce}` +
+        `\nIssued At: ${cleanIssuedAt}`
+    );
+}
+
 function attachWalletMenuListenersOnce() {
     if (walletMenuListenersAttached) return;
     document.addEventListener("click", (e) => {
@@ -879,7 +915,7 @@ function attachWalletMenuListenersOnce() {
 async function openAccountMenuOrConnectModal() {
     const hasToken = getJwtToken() != null;
     if (isConnected()) {
-        if (!hasToken) {
+        if (SIWE_ENABLED && !hasToken) {
             const eth = typeof window !== "undefined" ? window.ethereum : null;
             if (!eth) {
                 openWalletModal();
@@ -919,9 +955,22 @@ async function siweLogin(address, chainId) {
         // Use hostname (no port) to satisfy gateway allowlist (ALLOWED_SIWE_DOMAINS defaults to "localhost")
         const domain = window.location.hostname;
         const uri = window.location.origin;
-        const issuedAt = new Date().toISOString();
+        const issuedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
         const statement = "Sign in to TheFundingHouse.";
-        const message = `${domain} wants you to sign in with your Ethereum account:\n${address}\n\n${statement}\n\nURI: ${uri}\nVersion: 1\nChain ID: ${chainId}\nNonce: ${nonce}\nIssued At: ${issuedAt}`;
+        const chainIdValue = Number(chainId);
+        if (!address || !nonce || !domain || !uri || !Number.isFinite(chainIdValue)) {
+            if (msgBox) msgBox.textContent = "Login failed: invalid SIWE fields.";
+            return false;
+        }
+        const message = buildSiweMessage({
+            domain,
+            address,
+            statement,
+            uri,
+            chainId: chainIdValue,
+            nonce,
+            issuedAt,
+        });
         const signature = await eth.request({
             method: "personal_sign",
             params: [message, address],
@@ -932,7 +981,25 @@ async function siweLogin(address, chainId) {
             body: JSON.stringify({ message, signature }),
         });
         if (!verifyResp.ok) {
-            if (msgBox) msgBox.textContent = "Login failed. Please try again.";
+            let errDetail = "";
+            try {
+                const data = await verifyResp.json();
+                errDetail =
+                    data?.detail ||
+                    data?.message ||
+                    (typeof data === "string" ? data : JSON.stringify(data));
+            } catch (e) {
+                try {
+                    errDetail = await verifyResp.text();
+                } catch (err) {
+                    errDetail = "";
+                }
+            }
+            if (msgBox) {
+                msgBox.textContent = errDetail
+                    ? `Login failed: ${errDetail}`
+                    : "Login failed. Please try again.";
+            }
             return false;
         }
         const verifyData = await verifyResp.json();
@@ -950,7 +1017,11 @@ async function siweLogin(address, chainId) {
             return false;
         }
         console.error("SIWE login error", err);
-        if (msgBox) msgBox.textContent = "Login failed. Please try again.";
+        if (msgBox) {
+            msgBox.textContent = err?.message
+                ? `Login failed: ${err.message}`
+                : "Login failed. Please try again.";
+        }
         return false;
     }
 }
