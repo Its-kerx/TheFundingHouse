@@ -85,6 +85,24 @@ class PacificaAdapter(ExchangeAdapter):
             return None
         bids = data.get("bids") or data.get("bid") or data.get("b") or []
         asks = data.get("asks") or data.get("ask") or data.get("a") or []
+        if not bids and not asks:
+            levels = data.get("l") or []
+            for item in levels:
+                if not isinstance(item, (list, tuple)) or len(item) < 2:
+                    continue
+                side = item[-1]
+                price = item[0]
+                if isinstance(side, str):
+                    side_lower = side.lower()
+                    if side_lower in {"b", "bid"}:
+                        bids.append([price])
+                    elif side_lower in {"a", "ask"}:
+                        asks.append([price])
+                elif isinstance(side, (int, float)):
+                    if int(side) == 0:
+                        bids.append([price])
+                    elif int(side) == 1:
+                        asks.append([price])
 
         def best_price(side: Any, pick_max: bool) -> Optional[float]:
             prices: List[float] = []
@@ -103,6 +121,36 @@ class PacificaAdapter(ExchangeAdapter):
         if best_bid is None or best_ask is None:
             return best_bid or best_ask
         return (best_bid + best_ask) / 2.0
+
+    async def _get_latest_kline_close(self, symbol: str) -> Optional[float]:
+        now = datetime.now(timezone.utc)
+        end_ts = int(now.timestamp())
+        start_ts = end_ts - 3600
+        try:
+            payload = await self._get(
+                "/kline",
+                params={
+                    "symbol": symbol,
+                    "interval": "1m",
+                    "start_time": start_ts,
+                    "end_time": end_ts,
+                },
+            )
+        except Exception:
+            return None
+        data = payload.get("data") if isinstance(payload, dict) else payload
+        if isinstance(data, dict):
+            data = data.get("items") or data.get("klines") or data.get("candles") or data
+        if not isinstance(data, list) or not data:
+            return None
+        last = data[-1]
+        if isinstance(last, dict):
+            close = last.get("c") or last.get("close") or last.get("C")
+            if close is not None:
+                return self._to_float(close)
+        if isinstance(last, (list, tuple)) and len(last) >= 5:
+            return self._to_float(last[4])
+        return None
 
     async def _get_latest_funding_rate(self, symbol: str) -> Optional[Dict[str, Any]]:
         try:
@@ -143,6 +191,8 @@ class PacificaAdapter(ExchangeAdapter):
 
     async def get_market_data(self, symbol: str) -> Optional[Dict[str, Any]]:
         mark_price = await self._get_mid_price(symbol)
+        if not mark_price:
+            mark_price = await self._get_latest_kline_close(symbol)
         funding_info = await self._get_latest_funding_rate(symbol)
         funding_rate = self._to_float(funding_info.get("rate") if funding_info else None)
         return {

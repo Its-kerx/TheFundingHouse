@@ -36,6 +36,7 @@ let currentTimeframe = "live";
 let allRows = [];
 let filteredRows = [];
 let logoMap = {};
+let platformFilters = new Set();
 let filtersState = {
     aprMin: null,
     aprMax: null,
@@ -145,6 +146,27 @@ function initUIInteractions() {
         resetBtn.addEventListener("click", (e) => {
             e.preventDefault();
             resetFilters();
+        });
+    }
+
+    // C. Platform filters
+    const platformDropdown = document.getElementById("platforms-dropdown");
+    const syncPlatformFilters = () => {
+        platformFilters = new Set();
+        document.querySelectorAll("[data-platform]").forEach((checkbox) => {
+            const key = checkbox.dataset.platform;
+            if (checkbox.checked && key) {
+                platformFilters.add(key);
+            }
+        });
+    };
+    syncPlatformFilters();
+    if (platformDropdown) {
+        platformDropdown.addEventListener("change", (e) => {
+            const target = e.target;
+            if (!target || !target.matches("[data-platform]")) return;
+            syncPlatformFilters();
+            recomputeAndRender();
         });
     }
 
@@ -492,7 +514,7 @@ function matchesBounds(val, min, max) {
 
 function computeOiUsd(mkt) {
     const oi = Number(mkt?.open_interest);
-    const price = Number(mkt?.mark_price);
+    const price = Number(mkt?.mark_price ?? mkt?.price ?? mkt?.index_price);
     const ex = (mkt?.exchange || "").toString().toLowerCase();
     if (!Number.isFinite(oi) || oi <= 0) return null;
     if (ex === "hyperliquid") {
@@ -503,8 +525,16 @@ function computeOiUsd(mkt) {
 }
 
 function computePriceSpreadPct(pair) {
-    const a = Number(pair?.long_market?.mark_price);
-    const b = Number(pair?.short_market?.mark_price);
+    const a = Number(
+        pair?.long_market?.mark_price ??
+        pair?.long_market?.price ??
+        pair?.long_market?.index_price,
+    );
+    const b = Number(
+        pair?.short_market?.mark_price ??
+        pair?.short_market?.price ??
+        pair?.short_market?.index_price,
+    );
     if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b <= 0) return null;
     const mid = (a + b) / 2;
     if (mid <= 0) return null;
@@ -525,6 +555,28 @@ function computeTotalVol(pair) {
     const hasS = Number.isFinite(volS);
     if (!hasL && !hasS) return null;
     return (hasL ? volL : 0) + (hasS ? volS : 0);
+}
+
+function normalizeExchangeName(name) {
+    const raw = (name || "").toString().toLowerCase();
+    if (!raw) return "";
+    if (raw.includes("hyper")) return "hyperliquid";
+    if (raw.includes("backpack")) return "backpack";
+    if (raw.includes("pacifica")) return "pacifica";
+    if (raw.includes("paradex")) return "paradex";
+    if (raw.includes("aster")) return "aster";
+    if (raw.includes("dex") && raw.includes("extended")) return "extended";
+    if (raw.includes("extended")) return "extended";
+    return raw;
+}
+
+function applyPlatformFilters(data) {
+    if (!platformFilters || platformFilters.size === 0) return [];
+    return (data || []).filter((pair) => {
+        const longEx = normalizeExchangeName(pair?.long_market?.exchange);
+        const shortEx = normalizeExchangeName(pair?.short_market?.exchange);
+        return platformFilters.has(longEx) || platformFilters.has(shortEx);
+    });
 }
 
 function filterRows(data, filters) {
@@ -558,9 +610,18 @@ function applySearch(rows, term) {
 }
 
 function recomputeAndRender() {
+    if (!platformFilters || platformFilters.size === 0) {
+        platformFilters = new Set();
+        document.querySelectorAll("[data-platform]").forEach((checkbox) => {
+            const key = checkbox.dataset.platform;
+            if (checkbox.checked && key) {
+                platformFilters.add(key);
+            }
+        });
+    }
     const base = filterRows(allRows, filtersState);
-    const searched = applySearch(base, searchTerm);
-    filteredRows = searched;
+    const platformed = applyPlatformFilters(base);
+    filteredRows = applySearch(platformed, searchTerm);
     renderFundingRows(filteredRows);
     loadLogosForRows(filteredRows);
 }
