@@ -67,20 +67,27 @@ function safeJsonParse(str) {
 
 function initUIInteractions() {
     if (__tfhInitDone) return;
-    // A. Dropdown de Plataformas
-    const btn = document.getElementById("platforms-btn");
-    const dropdown = document.getElementById("platforms-dropdown");
 
-    if (btn && dropdown) {
-        btn.addEventListener("click", (e) => {
+    // A. Dropdown de Plataformas
+    const platformsBtn = document.getElementById("platforms-btn");
+    const platformsDropdown = document.getElementById("platforms-dropdown");
+
+    if (platformsBtn && platformsDropdown) {
+        platformsBtn.addEventListener("click", (e) => {
             e.stopPropagation();
-            dropdown.classList.toggle("hidden");
+            platformsDropdown.classList.toggle("hidden");
         });
 
-        // Cerrar si clic fuera
+        platformsDropdown.addEventListener("click", (e) => {
+            e.stopPropagation();
+        });
+
         document.addEventListener("click", (e) => {
-            if (!btn.contains(e.target) && !dropdown.contains(e.target)) {
-                dropdown.classList.add("hidden");
+            if (
+                !platformsBtn.contains(e.target) &&
+                !platformsDropdown.contains(e.target)
+            ) {
+                platformsDropdown.classList.add("hidden");
             }
         });
     }
@@ -150,7 +157,6 @@ function initUIInteractions() {
     }
 
     // C. Platform filters
-    const platformDropdown = document.getElementById("platforms-dropdown");
     const platformChecks = document.querySelectorAll(".js-platform-check");
     const syncPlatformFilters = () => {
         platformFilters = new Set();
@@ -164,8 +170,8 @@ function initUIInteractions() {
     syncPlatformFilters();
     platformChecks.forEach((checkbox) => {
         checkbox.addEventListener("change", (e) => {
-            const checkedCount = Array.from(platformChecks).filter(
-                (input) => input.checked
+            const checkedCount = document.querySelectorAll(
+                ".js-platform-check:checked"
             ).length;
             if (!e.target.checked && checkedCount < 2) {
                 e.target.checked = true;
@@ -176,15 +182,12 @@ function initUIInteractions() {
             recomputeAndRender();
         });
     });
-    void platformDropdown;
 
-    // C. Filtros de Tiempo
+    // D. Filtros de Tiempo
     const timeButtons = document.querySelectorAll(".time-btn");
     timeButtons.forEach((button) => {
         button.addEventListener("click", () => {
-            // Remover clase active de todos
             timeButtons.forEach((b) => b.classList.remove("active"));
-            // Añadir al clickeado
             button.classList.add("active");
 
             const tf = button.dataset.val || "live";
@@ -200,7 +203,7 @@ function initUIInteractions() {
         });
     });
 
-    // D. Search filter
+    // E. Search filter
     const searchInput = document.querySelector("[data-funding-search]");
     if (searchInput) {
         searchInput.addEventListener("input", (e) => {
@@ -209,14 +212,13 @@ function initUIInteractions() {
         });
     }
 
-    // E. Connect Wallet modal
+    // F. Connect Wallet modal
     injectWalletModal();
     injectWalletMenu();
     const connectBtn = document.getElementById("connect-wallet-btn");
     if (!connectBtn) {
         console.warn("connect-wallet-btn not found yet, will rely on delegation.");
     }
-    // Delegated click handler
     document.addEventListener("click", async (e) => {
         const btnEl = e.target.closest("#connect-wallet-btn");
         if (!btnEl) return;
@@ -226,23 +228,7 @@ function initUIInteractions() {
     window.__tfhWallet = walletState;
     attachWalletListenersOnce();
     attachWalletMenuListenersOnce();
-    
-    // --- NUEVO: Listeners para Plataformas ---
-    const platformChecks = document.querySelectorAll(".js-platform-check");
-        platformChecks.forEach(check => {
-        check.addEventListener("change", (e) => {
-            // Seguridad: Mínimo 2 seleccionados
-            const checkedCount = document.querySelectorAll(".js-platform-check:checked").length;
-            if (checkedCount < 2 && !e.target.checked) {
-                e.preventDefault();
-                e.target.checked = true; // Volver a marcar
-                alert("Debes mantener al menos 2 plataformas visibles.");
-                return;
-            }
-            recomputeAndRender(); // Actualizar tabla
-        });
-    });
-    
+
     __tfhInitDone = true;
 }
 
@@ -451,24 +437,24 @@ function renderFundingRows(data) {
                 : "";
 
         tr.innerHTML = `
-            <td class="px-4 py-3 text-slate-400 first:rounded-l-lg">${i + 1}</td>
+            <td class="px-4 py-3 text-slate-400 first:rounded-l-lg whitespace-nowrap">${i + 1}</td>
             <td class="px-4 py-3 text-white whitespace-nowrap">
                 <div class="inline-flex items-center gap-2 whitespace-nowrap" style="line-height:1;">
                     ${tokenVisual}
                     <span class="font-semibold inline-block">${pair.canonical_symbol || pair.pair_id || "-"}${fallbackBadge}</span>
                 </div>
             </td>
-            <td class="px-4 py-3 text-brandTeal font-mono">${fmtPercent(pair.spread_apr_percent)}</td>
-            <td class="px-4 py-3 text-slate-300 text-xs">
+            <td class="px-4 py-3 text-brandTeal font-mono whitespace-nowrap">${fmtPercent(pair.spread_apr_percent)}</td>
+            <td class="px-4 py-3 text-slate-300 text-xs whitespace-nowrap">
                 ${getExchangeAbbr(longExchange)} / ${getExchangeAbbr(shortExchange)}
             </td>
-            <td class="px-4 py-3 text-slate-400 font-mono hidden md:table-cell">${priceSpreadPctText}</td>
-            <td class="px-4 py-3 text-slate-400 font-mono text-xs hidden md:table-cell">
+            <td class="px-4 py-3 text-slate-400 font-mono hidden md:table-cell whitespace-nowrap">${priceSpreadPctText}</td>
+            <td class="px-4 py-3 text-slate-400 font-mono text-xs hidden md:table-cell whitespace-nowrap">
                 <div class="text-green-400/70">L: ${longOi}</div>
                 <div class="text-red-400/70">S: ${shortOi}</div>
                 <div class="text-slate-400/70 text-[12px]">T: ${totalOi}</div>
             </td>
-            <td class="px-4 py-3 text-slate-500 font-mono text-xs hidden md:table-cell">
+            <td class="px-4 py-3 text-slate-500 font-mono text-xs hidden md:table-cell whitespace-nowrap">
                 <div class="flex items-center justify-between gap-2">
                     <div>
                         <div class="text-green-400/70">L: ${volLText}</div>
@@ -477,7 +463,7 @@ function renderFundingRows(data) {
                     </div>
                 </div>
             </td>
-            <td class="px-4 py-3 text-right last:rounded-r-lg">
+            <td class="px-4 py-3 text-right last:rounded-r-lg whitespace-nowrap">
                 <button class="text-brandTeal hover:bg-brandTeal/10 p-2 rounded transition-colors"><i data-lucide="external-link" class="w-4 h-4"></i></button>
             </td>
         `;
@@ -613,24 +599,21 @@ function applyPlatformFilters(data) {
 }
 
 function filterRows(data, filters) {
-    // 1. Leer qué plataformas están marcadas
-    const activePlatforms = Array.from(document.querySelectorAll(".js-platform-check:checked"))
-        .map(cb => cb.value.toLowerCase());
+    const activePlatforms = Array.from(
+        document.querySelectorAll(".js-platform-check:checked")
+    )
+        .map((checkbox) => (checkbox.value || "").toLowerCase())
+        .filter(Boolean);
 
     return (data || []).filter((pair) => {
-        // 2. Lógica de Plataformas (ESTRICTA)
-        const longEx = (pair.long_market?.exchange || "").toLowerCase();
-        const shortEx = (pair.short_market?.exchange || "").toLowerCase();
+        if (activePlatforms.length === 0) return false;
 
-        // IMPORTANTE: Para mostrar la fila, AMBOS lados deben estar activos.
-        // Si longEx es "hyperliquid" y shortEx es "backpack", y desactivamos backpack,
-        // activePlatforms.includes("backpack") será false -> la fila se oculta.
-        const longOk = activePlatforms.includes(longEx);
-        const shortOk = activePlatforms.includes(shortEx);
-        
-        if (!longOk || !shortOk) return false;
+        const longEx = normalizeExchangeName(pair?.long_market?.exchange);
+        const shortEx = normalizeExchangeName(pair?.short_market?.exchange);
+        if (!activePlatforms.includes(longEx) || !activePlatforms.includes(shortEx)) {
+            return false;
+        }
 
-        // 3. Resto de filtros numéricos (igual que antes)
         const spreadVal = Number(pair.spread_apr_percent);
         if (!matchesBounds(spreadVal, filters.aprMin, filters.aprMax)) return false;
 
